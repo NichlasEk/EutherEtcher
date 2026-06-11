@@ -16,10 +16,29 @@ pub fn write_image(
     chunk_size_mib: u64,
     show_progress: bool,
 ) -> Result<()> {
+    let progress = progress_bar(image_size, show_progress);
+
+    write_image_with_progress(image_path, device_path, chunk_size_mib, |written| {
+        progress.set_position(written)
+    })?;
+
+    progress.finish();
+    Ok(())
+}
+
+pub fn write_image_with_progress<F>(
+    image_path: &Path,
+    device_path: &Path,
+    chunk_size_mib: u64,
+    mut on_progress: F,
+) -> Result<()>
+where
+    F: FnMut(u64),
+{
     let mut image = File::open(image_path)?;
     let mut device = OpenOptions::new().write(true).open(device_path)?;
     let mut buffer = vec![0_u8; (chunk_size_mib * 1024 * 1024) as usize];
-    let progress = progress_bar(image_size, show_progress);
+    let mut written = 0_u64;
 
     loop {
         let read = image.read(&mut buffer)?;
@@ -27,11 +46,11 @@ pub fn write_image(
             break;
         }
         device.write_all(&buffer[..read])?;
-        progress.inc(read as u64);
+        written += read as u64;
+        on_progress(written);
     }
 
     device.flush()?;
-    progress.finish();
     sync_system()?;
     Ok(())
 }

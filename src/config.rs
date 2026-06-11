@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::error::Result;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub flash: FlashConfig,
@@ -41,16 +41,6 @@ pub struct UiConfig {
     pub show_progress: bool,
     #[serde(default)]
     pub verbose: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            flash: FlashConfig::default(),
-            safety: SafetyConfig::default(),
-            ui: UiConfig::default(),
-        }
-    }
 }
 
 impl Default for SafetyConfig {
@@ -90,4 +80,57 @@ fn default_true() -> bool {
 
 fn default_max_device_size_gib() -> u64 {
     256
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_full_toml_config() {
+        let config: Config = toml::from_str(
+            r#"
+            [flash]
+            image = "./archlinux.iso"
+            device = "/dev/sdb"
+            verify_after_write = true
+            chunk_size_mib = 8
+
+            [safety]
+            refuse_internal_drives = true
+            refuse_mounted_devices = false
+            max_device_size_gib_without_force = 64
+            require_typed_confirmation = true
+
+            [ui]
+            show_progress = false
+            verbose = true
+            "#,
+        )
+        .expect("valid config should parse");
+
+        assert_eq!(config.flash.image.as_deref(), Some("./archlinux.iso"));
+        assert_eq!(config.flash.device.as_deref(), Some("/dev/sdb"));
+        assert!(config.flash.verify_after_write);
+        assert_eq!(config.flash.chunk_size_mib, Some(8));
+        assert!(config.safety.refuse_internal_drives);
+        assert!(!config.safety.refuse_mounted_devices);
+        assert_eq!(config.safety.max_device_size_gib_without_force, 64);
+        assert!(config.safety.require_typed_confirmation);
+        assert!(!config.ui.show_progress);
+        assert!(config.ui.verbose);
+    }
+
+    #[test]
+    fn defaults_missing_sections() {
+        let config: Config = toml::from_str("").expect("empty config should use defaults");
+
+        assert!(config.flash.image.is_none());
+        assert!(config.safety.refuse_internal_drives);
+        assert!(config.safety.refuse_mounted_devices);
+        assert_eq!(config.safety.max_device_size_gib_without_force, 256);
+        assert!(config.safety.require_typed_confirmation);
+        assert!(config.ui.show_progress);
+        assert!(!config.ui.verbose);
+    }
 }

@@ -13,6 +13,7 @@ eutheretcher list
 eutheretcher flash --image ./file.iso --device /dev/sdX
 eutheretcher flash --config ./eutheretcher.toml
 eutheretcher verify --image ./file.iso --device /dev/sdX
+eutheretcher gui
 ```
 
 ## Safety
@@ -25,6 +26,7 @@ Before flashing, EutherEtcher performs basic checks:
 - Requires double confirmation before writing.
 - Refuses when the image is larger than the target device.
 - Runs `sync` after writing.
+- Supports a dry-run mode before writing.
 
 Run `eutheretcher list` and inspect the device path carefully before flashing.
 
@@ -56,6 +58,17 @@ verbose = true
 ```bash
 cargo build
 ```
+
+## GUI
+
+The GUI is available as a native Linux window:
+
+```bash
+cargo run -- gui
+```
+
+It uses the same safety checks as the CLI. Flashing from the GUI still requires
+typing the exact target device path.
 
 ## Notes
 

@@ -116,3 +116,91 @@ impl From<LsblkDevice> for BlockDevice {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_lsblk_json_with_children_and_mountpoints() {
+        let json = br#"
+        {
+          "blockdevices": [
+            {
+              "name": "sdb",
+              "path": "/dev/sdb",
+              "size": 16000000000,
+              "tran": "usb",
+              "model": "USB DISK",
+              "mountpoints": [null],
+              "type": "disk",
+              "rm": true,
+              "children": [
+                {
+                  "name": "sdb1",
+                  "path": "/dev/sdb1",
+                  "size": 15999000000,
+                  "tran": null,
+                  "model": null,
+                  "mountpoints": ["/run/media/user/USB"],
+                  "type": "part",
+                  "rm": true
+                }
+              ]
+            }
+          ]
+        }
+        "#;
+
+        let devices = parse_lsblk_json(json).expect("lsblk JSON should parse");
+        let disk = &devices[0];
+
+        assert_eq!(disk.name, "sdb");
+        assert_eq!(disk.path, "/dev/sdb");
+        assert_eq!(disk.size_bytes, Some(16_000_000_000));
+        assert_eq!(disk.transport.as_deref(), Some("usb"));
+        assert_eq!(disk.model.as_deref(), Some("USB DISK"));
+        assert!(disk.mountpoints.is_empty());
+        assert_eq!(disk.children.len(), 1);
+        assert_eq!(disk.children[0].mountpoints, ["/run/media/user/USB"]);
+        assert!(disk.has_mountpoints_recursive());
+    }
+
+    #[test]
+    fn finds_nested_device_by_path() {
+        let json = br#"
+        {
+          "blockdevices": [
+            {
+              "name": "sdb",
+              "path": "/dev/sdb",
+              "size": 1024,
+              "tran": "usb",
+              "model": "USB",
+              "mountpoints": [],
+              "type": "disk",
+              "rm": true,
+              "children": [
+                {
+                  "name": "sdb1",
+                  "path": "/dev/sdb1",
+                  "size": 512,
+                  "tran": null,
+                  "model": null,
+                  "mountpoints": [],
+                  "type": "part",
+                  "rm": true
+                }
+              ]
+            }
+          ]
+        }
+        "#;
+
+        let devices = parse_lsblk_json(json).expect("lsblk JSON should parse");
+        let found = find_device(&devices, "/dev/sdb1").expect("nested device should be found");
+
+        assert_eq!(found.name, "sdb1");
+        assert_eq!(found.kind, "part");
+    }
+}

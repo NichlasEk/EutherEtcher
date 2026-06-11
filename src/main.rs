@@ -1,6 +1,7 @@
 mod config;
 mod device;
 mod error;
+mod gui;
 mod image;
 mod safety;
 mod verify;
@@ -31,6 +32,7 @@ enum Command {
     List,
     Flash(FlashArgs),
     Verify(VerifyArgs),
+    Gui,
 }
 
 #[derive(Debug, Args)]
@@ -45,6 +47,8 @@ struct FlashArgs {
     force: bool,
     #[arg(long)]
     yes: bool,
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -71,6 +75,7 @@ fn run() -> Result<()> {
         Command::List => list_command(),
         Command::Flash(args) => flash_command(args),
         Command::Verify(args) => verify_command(args),
+        Command::Gui => gui::run_gui(),
     }
 }
 
@@ -80,8 +85,8 @@ fn list_command() -> Result<()> {
     flatten_devices(&devices, &mut flat);
 
     println!(
-        "{:<12} {:<10} {:<8} {:<6} {:<28} {:<24} {}",
-        "PATH", "SIZE", "TRAN", "TYPE", "MODEL", "MOUNTPOINTS", "NAME"
+        "{:<12} {:<10} {:<8} {:<6} {:<28} {:<24} NAME",
+        "PATH", "SIZE", "TRAN", "TYPE", "MODEL", "MOUNTPOINTS"
     );
 
     for device in flat {
@@ -121,6 +126,13 @@ fn flash_command(args: FlashArgs) -> Result<()> {
         .ok_or_else(|| EutherError::DeviceNotFound(device_path.display().to_string()))?;
 
     run_safety_checks(device, &image, &config.safety, args.force)?;
+
+    safety::print_write_plan(device, &image, chunk_size_mib);
+
+    if args.dry_run {
+        println!("dry-run complete; no data was written");
+        return Ok(());
+    }
 
     if !args.yes {
         confirm_write(device, &image, config.safety.require_typed_confirmation)?;

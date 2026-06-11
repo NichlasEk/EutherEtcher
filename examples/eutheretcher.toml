@@ -1,0 +1,15 @@
+[flash]
+image = "./archlinux.iso"
+device = "/dev/sdX"
+verify_after_write = true
+chunk_size_mib = 4
+
+[safety]
+refuse_internal_drives = true
+refuse_mounted_devices = true
+max_device_size_gib_without_force = 256
+require_typed_confirmation = true
+
+[ui]
+show_progress = true
+verbose = true

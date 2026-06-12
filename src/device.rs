@@ -14,6 +14,8 @@ pub struct BlockDevice {
     pub mountpoints: Vec<String>,
     pub kind: String,
     pub removable: bool,
+    pub serial: Option<String>,
+    pub wwn: Option<String>,
     pub children: Vec<BlockDevice>,
 }
 
@@ -35,6 +37,8 @@ struct LsblkDevice {
     kind: String,
     #[serde(default)]
     rm: bool,
+    serial: Option<String>,
+    wwn: Option<String>,
     #[serde(default)]
     children: Vec<LsblkDevice>,
 }
@@ -45,7 +49,7 @@ pub fn list_devices() -> Result<Vec<BlockDevice>> {
             "--json",
             "--bytes",
             "--output",
-            "NAME,PATH,SIZE,TRAN,MODEL,MOUNTPOINTS,TYPE,RM",
+            "NAME,PATH,SIZE,TRAN,MODEL,MOUNTPOINTS,TYPE,RM,SERIAL,WWN",
         ])
         .output()?;
 
@@ -169,6 +173,20 @@ impl BlockDevice {
             "OTHER"
         }
     }
+
+    pub fn identity_fingerprint(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            self.path,
+            self.size_bytes
+                .map(|size| size.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            self.transport.as_deref().unwrap_or("-"),
+            self.model.as_deref().unwrap_or("-"),
+            self.serial.as_deref().unwrap_or("-"),
+            self.wwn.as_deref().unwrap_or("-")
+        )
+    }
 }
 
 impl From<LsblkDevice> for BlockDevice {
@@ -182,6 +200,8 @@ impl From<LsblkDevice> for BlockDevice {
             mountpoints: value.mountpoints.into_iter().flatten().collect(),
             kind: value.kind,
             removable: value.rm,
+            serial: value.serial.map(|serial| serial.trim().to_string()),
+            wwn: value.wwn.map(|wwn| wwn.trim().to_string()),
             children: value.children.into_iter().map(BlockDevice::from).collect(),
         }
     }
@@ -205,6 +225,8 @@ mod tests {
               "mountpoints": [null],
               "type": "disk",
               "rm": true,
+              "serial": "ABC123",
+              "wwn": "0x123",
               "children": [
                 {
                   "name": "sdb1",
@@ -214,7 +236,9 @@ mod tests {
                   "model": null,
                   "mountpoints": ["/run/media/user/USB"],
                   "type": "part",
-                  "rm": true
+                  "rm": true,
+                  "serial": null,
+                  "wwn": null
                 }
               ]
             }
@@ -230,6 +254,8 @@ mod tests {
         assert_eq!(disk.size_bytes, Some(16_000_000_000));
         assert_eq!(disk.transport.as_deref(), Some("usb"));
         assert_eq!(disk.model.as_deref(), Some("USB DISK"));
+        assert_eq!(disk.serial.as_deref(), Some("ABC123"));
+        assert_eq!(disk.wwn.as_deref(), Some("0x123"));
         assert!(disk.mountpoints.is_empty());
         assert_eq!(disk.children.len(), 1);
         assert_eq!(disk.children[0].mountpoints, ["/run/media/user/USB"]);
@@ -250,6 +276,8 @@ mod tests {
               "mountpoints": [],
               "type": "disk",
               "rm": true,
+              "serial": null,
+              "wwn": null,
               "children": [
                 {
                   "name": "sdb1",
@@ -259,7 +287,9 @@ mod tests {
                   "model": null,
                   "mountpoints": [],
                   "type": "part",
-                  "rm": true
+                  "rm": true,
+                  "serial": null,
+                  "wwn": null
                 }
               ]
             }
@@ -347,6 +377,8 @@ mod tests {
             mountpoints: Vec::new(),
             kind: kind.to_string(),
             removable,
+            serial: None,
+            wwn: None,
             children: Vec::new(),
         }
     }

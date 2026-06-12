@@ -80,6 +80,12 @@ sudo install -m 0755 target/release/eutheretcher /usr/local/bin/eutheretcher
 sudo install -m 0644 packaging/dev.euther.EutherEtcher.policy /usr/share/polkit-1/actions/dev.euther.EutherEtcher.policy
 ```
 
+## Release
+
+Pushing a tag like `v0.1.0` runs the release workflow and publishes a `.tar.gz`
+containing the binary, icon, desktop file, polkit policy, README, and install
+script.
+
 ## GUI
 
 The GUI is available as a native Linux window:
@@ -102,9 +108,17 @@ The GUI flow is intentionally simple:
 Partitions are shown as target details, not as clickable flash targets.
 The pre-flight view shows SHA256, mountpoints, risk, model, transport, and size.
 Mounted targets remain blocked.
+If a target has mounted partitions, the GUI can explicitly request an unmount
+through the privileged helper. It never unmounts automatically.
+
+EutherEtcher locks the selected target identity before flashing. If `/dev/sdX`
+now points at a different model, size, serial, or WWN than the selected card, the
+write is refused and the device list must be refreshed.
 
 The GUI normally runs without root privileges. When flashing is started, it uses
 `pkexec` to run EutherEtcher's hidden writer helper with elevated privileges.
+The helper reports structured phase, progress, and error messages back to the
+GUI for clearer failures.
 
 The GUI starts a built-in procedural cyberpunk loop by default. It includes ten
 free generated loops, picks one at startup, loops it continuously, and exposes

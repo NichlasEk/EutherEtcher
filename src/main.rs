@@ -41,6 +41,8 @@ enum Command {
     Gui,
     #[command(hide = true)]
     WriterHelper(WriterHelperArgs),
+    #[command(hide = true)]
+    UnmountHelper(UnmountHelperArgs),
 }
 
 #[derive(Debug, Args)]
@@ -91,9 +93,19 @@ struct WriterHelperArgs {
     force: bool,
 }
 
+#[derive(Debug, Args)]
+struct UnmountHelperArgs {
+    #[arg(long)]
+    device: PathBuf,
+}
+
 fn main() {
     if let Err(err) = run() {
-        eprintln!("error: {err}");
+        if std::env::args().nth(1).as_deref() == Some("writer-helper") {
+            eprintln!("ERROR\t{}\t{}", helper_error_code(&err), err);
+        } else {
+            eprintln!("error: {err}");
+        }
         std::process::exit(1);
     }
 }
@@ -107,6 +119,7 @@ fn run() -> Result<()> {
         Command::Verify(args) => verify_command(args),
         Command::Gui => gui::run_gui(),
         Command::WriterHelper(args) => writer_helper_command(args),
+        Command::UnmountHelper(args) => unmount_helper_command(args),
     }
 }
 
@@ -161,6 +174,7 @@ fn flash_command(args: FlashArgs) -> Result<()> {
     let devices = list_devices()?;
     let device = find_device(&devices, path_to_str(&device_path)?)
         .ok_or_else(|| EutherError::DeviceNotFound(device_path.display().to_string()))?;
+    let identity = device.identity_fingerprint();
 
     run_safety_checks(device, &image, &config.safety, args.force)?;
 
@@ -184,6 +198,8 @@ fn flash_command(args: FlashArgs) -> Result<()> {
             chunk_size_mib
         );
     }
+
+    verify_device_identity(path_to_str(&device_path)?, &identity)?;
 
     writer::write_image(
         &image.path,
@@ -247,8 +263,10 @@ fn writer_helper_command(args: WriterHelperArgs) -> Result<()> {
     let devices = list_devices()?;
     let device = find_device(&devices, path_to_str(&args.device)?)
         .ok_or_else(|| EutherError::DeviceNotFound(args.device.display().to_string()))?;
+    let identity = device.identity_fingerprint();
 
     run_safety_checks(device, &image, &Default::default(), args.force)?;
+    verify_device_identity(path_to_str(&args.device)?, &identity)?;
 
     helper_phase("Writing", image.size_bytes)?;
     writer::write_image_with_progress(
@@ -281,6 +299,35 @@ fn writer_helper_command(args: WriterHelperArgs) -> Result<()> {
     Ok(())
 }
 
+fn unmount_helper_command(args: UnmountHelperArgs) -> Result<()> {
+    let devices = list_devices()?;
+    let device = find_device(&devices, path_to_str(&args.device)?)
+        .ok_or_else(|| EutherError::DeviceNotFound(args.device.display().to_string()))?;
+
+    for mountpoint in collect_mountpoints(device) {
+        let status = std::process::Command::new("umount")
+            .arg(&mountpoint)
+            .status()?;
+        if !status.success() {
+            return Err(EutherError::Safety(format!(
+                "failed to unmount {mountpoint}"
+            )));
+        }
+    }
+
+    println!("DONE");
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn collect_mountpoints(device: &device::BlockDevice) -> Vec<String> {
+    let mut mountpoints = device.mountpoints.clone();
+    for child in &device.children {
+        mountpoints.extend(collect_mountpoints(child));
+    }
+    mountpoints
+}
+
 fn helper_phase(name: &str, total: u64) -> Result<()> {
     println!("PHASE\t{name}\t{total}");
     io::stdout().flush()?;
@@ -291,6 +338,41 @@ fn helper_progress(done: u64, total: u64) -> Result<()> {
     println!("PROGRESS\t{done}\t{total}");
     io::stdout().flush()?;
     Ok(())
+}
+
+fn helper_error_code(err: &EutherError) -> &'static str {
+    match err {
+        EutherError::VerificationFailed { .. } => "VERIFY_FAILED",
+        EutherError::Cancelled => "CANCELLED",
+        EutherError::DeviceNotFound(_) => "DEVICE_REMOVED",
+        EutherError::Safety(message) if message.contains("mounted") => "MOUNTED",
+        EutherError::Io(io_err)
+            if matches!(
+                io_err.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+            ) =>
+        {
+            if io_err.kind() == io::ErrorKind::PermissionDenied {
+                "PERMISSION"
+            } else {
+                "DEVICE_REMOVED"
+            }
+        }
+        _ => "FAILED",
+    }
+}
+
+fn verify_device_identity(path: &str, expected: &str) -> Result<()> {
+    let devices = list_devices()?;
+    let current =
+        find_device(&devices, path).ok_or_else(|| EutherError::DeviceNotFound(path.to_string()))?;
+    if current.identity_fingerprint() == expected {
+        Ok(())
+    } else {
+        Err(EutherError::Safety(format!(
+            "{path} changed identity before writing"
+        )))
+    }
 }
 
 fn load_optional_config(path: Option<&Path>) -> Result<Config> {

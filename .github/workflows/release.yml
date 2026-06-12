@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          package="eutheretcher-${version}-linux-x86_64"
+          mkdir -p "dist/${package}"
+          cp target/release/eutheretcher "dist/${package}/"
+          cp README.md "dist/${package}/"
+          cp assets/eutheretcher.svg "dist/${package}/"
+          cp packaging/eutheretcher.desktop "dist/${package}/"
+          cp packaging/dev.euther.EutherEtcher.policy "dist/${package}/"
+          cp scripts/install-desktop.sh "dist/${package}/"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz

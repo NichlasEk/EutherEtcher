@@ -1,4 +1,7 @@
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 
 use crate::{
     config::SafetyConfig,
@@ -13,6 +16,25 @@ pub fn run_safety_checks(
     config: &SafetyConfig,
     force: bool,
 ) -> Result<()> {
+    if !device.path.starts_with("/dev/") {
+        return Err(EutherError::Safety(format!(
+            "{} is not under /dev",
+            device.path
+        )));
+    }
+
+    let device_path = Path::new(&device.path);
+    if device_path
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(EutherError::Safety(format!(
+            "{} is a symlink; select the real block device path",
+            device.path
+        )));
+    }
+
     if device.kind != "disk" {
         return Err(EutherError::Safety(format!(
             "{} is type '{}', not a whole disk",
@@ -144,6 +166,8 @@ mod tests {
             mountpoints: Vec::new(),
             kind: "disk".to_string(),
             removable: true,
+            serial: None,
+            wwn: None,
             children: Vec::new(),
         }
     }

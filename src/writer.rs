@@ -83,3 +83,58 @@ fn sync_system() -> Result<()> {
     Command::new("sync").status()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io::Write};
+
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::cancel::CancelFlag;
+
+    #[test]
+    fn writes_image_to_target_file() {
+        let mut image = NamedTempFile::new().expect("image temp file");
+        let target = NamedTempFile::new().expect("target temp file");
+        image.write_all(b"eutheretcher").expect("write image");
+
+        write_image_with_progress(
+            image.path(),
+            target.path(),
+            1,
+            |_written| Ok(()),
+            &CancelFlag::default(),
+        )
+        .expect("write should succeed");
+
+        assert_eq!(
+            fs::read(target.path()).expect("read target"),
+            b"eutheretcher"
+        );
+    }
+
+    #[test]
+    fn cancels_write_before_next_chunk() {
+        let mut image = NamedTempFile::new().expect("image temp file");
+        let target = NamedTempFile::new().expect("target temp file");
+        image
+            .write_all(&vec![7_u8; 2 * 1024 * 1024])
+            .expect("write image");
+        let cancel = CancelFlag::default();
+
+        let err = write_image_with_progress(
+            image.path(),
+            target.path(),
+            1,
+            |_written| {
+                cancel.cancel();
+                Ok(())
+            },
+            &cancel,
+        )
+        .expect_err("write should be cancelled");
+
+        assert!(matches!(err, crate::error::EutherError::Cancelled));
+    }
+}

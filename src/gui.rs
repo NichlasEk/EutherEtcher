@@ -34,6 +34,7 @@ enum FlashEvent {
 pub struct EutherGui {
     devices: Vec<BlockDevice>,
     selected_device: Option<String>,
+    selected_device_identity: Option<String>,
     image_path: String,
     confirm_path: String,
     chunk_size_mib: u64,
@@ -66,6 +67,7 @@ impl Default for EutherGui {
         let mut app = Self {
             devices: Vec::new(),
             selected_device: None,
+            selected_device_identity: None,
             image_path: String::new(),
             confirm_path: String::new(),
             chunk_size_mib: default_chunk_size_mib(),
@@ -314,6 +316,7 @@ impl EutherGui {
 
         if response.interact(Sense::click()).clicked() {
             self.selected_device = Some(device.path.clone());
+            self.selected_device_identity = Some(device.identity_fingerprint());
             self.confirm_path.clear();
         }
     }
@@ -399,6 +402,14 @@ impl EutherGui {
                 ui.label(RichText::new(&self.status).color(Color32::from_rgb(213, 219, 215)));
                 if self.running && ui.button("Cancel").clicked() {
                     self.cancel_flash();
+                }
+                if let Ok(device) = self.selected_block_device() {
+                    if !self.running
+                        && device.has_mountpoints_recursive()
+                        && ui.button("Unmount target").clicked()
+                    {
+                        self.unmount_selected_target(device.path);
+                    }
                 }
                 if self.phase_total_bytes > 0 {
                     ui.label(
@@ -620,6 +631,28 @@ impl EutherGui {
             .ok_or_else(|| format!("Device no longer present: {path}"))
     }
 
+    fn verify_selected_device_identity(
+        &self,
+        selected: &BlockDevice,
+    ) -> std::result::Result<(), String> {
+        let expected = self
+            .selected_device_identity
+            .as_deref()
+            .ok_or_else(|| "Selected device identity is missing".to_string())?;
+        let devices = list_devices().map_err(|err| err.to_string())?;
+        let current = find_device(&devices, &selected.path)
+            .ok_or_else(|| format!("Device disappeared before flashing: {}", selected.path))?;
+
+        if current.identity_fingerprint() == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} changed since it was selected; refresh devices and select it again",
+                selected.path
+            ))
+        }
+    }
+
     fn is_armed(&self) -> bool {
         self.selected_device
             .as_deref()
@@ -720,6 +753,11 @@ impl EutherGui {
 
         if self.confirm_path.trim() != device.path {
             self.last_error = Some(format!("Type {} before flashing", device.path));
+            return;
+        }
+
+        if let Err(err) = self.verify_selected_device_identity(&device) {
+            self.last_error = Some(err);
             return;
         }
 
@@ -841,6 +879,42 @@ impl EutherGui {
             }
         }
         self.status = "Cancelling".to_string();
+    }
+
+    fn unmount_selected_target(&mut self, device_path: String) {
+        if !command_exists("pkexec") {
+            self.last_error = Some("pkexec was not found".to_string());
+            return;
+        }
+
+        match std::env::current_exe()
+            .map_err(|err| err.to_string())
+            .and_then(|exe| {
+                Command::new("pkexec")
+                    .arg(exe)
+                    .arg("unmount-helper")
+                    .arg("--device")
+                    .arg(&device_path)
+                    .output()
+                    .map_err(|err| err.to_string())
+            }) {
+            Ok(output) if output.status.success() => {
+                self.status = "Target unmounted".to_string();
+                self.last_error = None;
+                self.refresh_devices();
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                self.last_error = Some(if stderr.is_empty() {
+                    "failed to unmount target".to_string()
+                } else {
+                    stderr
+                });
+            }
+            Err(err) => {
+                self.last_error = Some(err);
+            }
+        }
     }
 
     fn preflight_window(&mut self, ctx: &egui::Context) {
@@ -1190,6 +1264,11 @@ fn parse_helper_line(sender: &mpsc::Sender<FlashEvent>, line: &str) {
                 done_bytes,
                 total_bytes,
             });
+        }
+        Some("ERROR") => {
+            let code = parts.next().unwrap_or("FAILED");
+            let message = parts.next().unwrap_or("writer helper failed");
+            let _ = sender.send(FlashEvent::Finished(Err(format!("{code}: {message}"))));
         }
         Some("DONE") => {}
         _ => {}

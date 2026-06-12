@@ -88,3 +88,52 @@ fn progress_bar(total: u64, show: bool) -> ProgressBar {
     bar.set_style(style);
     bar
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::cancel::CancelFlag;
+
+    #[test]
+    fn verifies_matching_target_file() {
+        let mut image = NamedTempFile::new().expect("image temp file");
+        let mut target = NamedTempFile::new().expect("target temp file");
+        image.write_all(b"match").expect("write image");
+        target.write_all(b"match").expect("write target");
+
+        verify_image_with_progress(
+            image.path(),
+            target.path(),
+            1,
+            |_verified| Ok(()),
+            &CancelFlag::default(),
+        )
+        .expect("verify should succeed");
+    }
+
+    #[test]
+    fn rejects_mismatched_target_file() {
+        let mut image = NamedTempFile::new().expect("image temp file");
+        let mut target = NamedTempFile::new().expect("target temp file");
+        image.write_all(b"image").expect("write image");
+        target.write_all(b"xxxxx").expect("write target");
+
+        let err = verify_image_with_progress(
+            image.path(),
+            target.path(),
+            1,
+            |_verified| Ok(()),
+            &CancelFlag::default(),
+        )
+        .expect_err("verify should fail");
+
+        assert!(matches!(
+            err,
+            crate::error::EutherError::VerificationFailed { .. }
+        ));
+    }
+}

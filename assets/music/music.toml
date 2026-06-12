@@ -1,13 +1,32 @@
-# Optional external music playlist for EutherEtcher.
+# Bundled EutherEtcher music pack.
 #
-# Put CC0/CC-BY compatible .ogg, .flac, or .wav files in this folder and list
-# them below. Missing files are ignored and the built-in procedural cyberpunk
-# loops remain the fallback.
-#
-# Example:
-#
-# [[track]]
-# title = "Night Bus Terminal"
-# file = "assets/music/night-bus-terminal.ogg"
-# license = "CC0"
-# source = "https://example.invalid/source"
+# These are real redistributed OGG files. Keep each source URL and license with
+# the track so package builds preserve attribution.
+
+[[track]]
+title = "Tragic ambient main menu"
+author = "brandon75689"
+file = "tragic-ambient-main-menu.ogg"
+license = "CC0 / OGA-BY 3.0"
+source = "https://opengameart.org/content/tragic-ambient-main-menu"
+
+[[track]]
+title = "Crystal Cave + Mysterious Ambience"
+author = "cynicmusic"
+file = "crystal-cave-mysterious-ambience.ogg"
+license = "CC-BY 3.0"
+source = "https://opengameart.org/content/crystal-cave-mysterious-ambience-seamless-loop"
+
+[[track]]
+title = "Factory ambiance"
+author = "yd"
+file = "factory-ambiance.ogg"
+license = "CC0"
+source = "https://opengameart.org/content/factory-ambiance"
+
+[[track]]
+title = "Through Space"
+author = "maxstack"
+file = "through-space.ogg"
+license = "CC-BY-SA 3.0"
+source = "https://opengameart.org/content/through-space"

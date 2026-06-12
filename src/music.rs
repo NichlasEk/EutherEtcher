@@ -60,6 +60,8 @@ struct MusicManifest {
 #[derive(Debug, Clone, Deserialize)]
 struct MusicTrack {
     title: String,
+    #[serde(default)]
+    author: Option<String>,
     file: PathBuf,
     license: String,
     source: String,
@@ -105,8 +107,14 @@ impl AudioEngine {
                 .and_then(|file| Decoder::try_from(file).map_err(|err| err.to_string()))
             {
                 Ok(source) => {
-                    self.current_name =
-                        format!("{} ({}, {})", track.title, track.license, track.source);
+                    let author = track.author.as_deref().unwrap_or("unknown artist");
+                    self.current_name = format!(
+                        "{} - {} ({}, {})",
+                        track.title,
+                        author,
+                        track.license,
+                        source_label(&track.source)
+                    );
                     self.player.append(source.repeat_infinite());
                 }
                 Err(_) => {
@@ -336,19 +344,78 @@ fn soft_clip(value: f32) -> f32 {
 }
 
 fn load_music_tracks() -> Vec<MusicTrack> {
-    let manifest_path = Path::new("assets/music/music.toml");
-    let Ok(data) = fs::read_to_string(manifest_path) else {
-        return Vec::new();
-    };
-    let Ok(manifest) = toml::from_str::<MusicManifest>(&data) else {
-        return Vec::new();
+    for manifest_path in music_manifest_paths() {
+        let Ok(data) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = toml::from_str::<MusicManifest>(&data) else {
+            continue;
+        };
+        let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+        let tracks = manifest
+            .track
+            .into_iter()
+            .filter_map(|track| resolve_music_track(manifest_dir, track))
+            .collect::<Vec<_>>();
+        if !tracks.is_empty() {
+            return tracks;
+        }
+    }
+
+    Vec::new()
+}
+
+fn music_manifest_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    paths.push(PathBuf::from("assets/music/music.toml"));
+
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+        paths.push(PathBuf::from(data_home).join("eutheretcher/music/music.toml"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join(".local/share/eutheretcher/music/music.toml"));
+    }
+
+    paths.push(PathBuf::from(
+        "/usr/local/share/eutheretcher/music/music.toml",
+    ));
+    paths.push(PathBuf::from("/usr/share/eutheretcher/music/music.toml"));
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            paths.push(exe_dir.join("assets/music/music.toml"));
+            paths.push(exe_dir.join("../share/eutheretcher/music/music.toml"));
+        }
+    }
+
+    paths
+}
+
+fn resolve_music_track(manifest_dir: &Path, mut track: MusicTrack) -> Option<MusicTrack> {
+    let resolved = if track.file.is_absolute() {
+        track.file.clone()
+    } else {
+        manifest_dir.join(&track.file)
     };
 
-    manifest
-        .track
-        .into_iter()
-        .filter(|track| track.file.exists())
-        .collect()
+    if resolved.exists() {
+        track.file = resolved;
+        Some(track)
+    } else if track.file.exists() {
+        Some(track)
+    } else {
+        None
+    }
+}
+
+fn source_label(source: &str) -> &str {
+    source
+        .strip_prefix("https://")
+        .or_else(|| source.strip_prefix("http://"))
+        .and_then(|rest| rest.split('/').next())
+        .filter(|host| !host.is_empty())
+        .unwrap_or(source)
 }
 
 fn random_index(max: usize) -> usize {

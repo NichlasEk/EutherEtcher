@@ -94,8 +94,8 @@ The GUI is available as a native Linux window:
 cargo run -- gui
 ```
 
-It uses the same safety checks as the CLI. Flashing from the GUI still requires
-typing the exact target device path.
+It uses the same safety checks as the CLI. Flashing from the GUI asks for
+administrator authorization through polkit when the final write starts.
 
 The GUI flow is intentionally simple:
 
@@ -103,7 +103,7 @@ The GUI flow is intentionally simple:
 - Or drag-and-drop an `.iso` or `.img` into the window.
 - Select a whole-disk USB/SD target card.
 - Review the pre-flight confirmation.
-- Type the exact target path before the final flash button unlocks.
+- Press `Flash now` and authorize the write through polkit.
 
 Partitions are shown as target details, not as clickable flash targets.
 The pre-flight view shows SHA256, mountpoints, risk, model, transport, and size.
@@ -120,12 +120,39 @@ The GUI normally runs without root privileges. When flashing is started, it uses
 The helper reports structured phase, progress, and error messages back to the
 GUI for clearer failures.
 
-The GUI starts a built-in procedural cyberpunk loop by default. It includes ten
-free generated loops, picks one at startup, loops it continuously, and exposes
-music on/off plus next-loop controls.
+The GUI ships with a small real OGG music pack, picks one track at startup,
+loops it continuously, and exposes music on/off plus next-track controls. The
+old procedural synth loops remain only as a fallback when no playable external
+track is found.
 
-External CC0/CC-BY music can be added through `assets/music/music.toml`. Missing
-files are ignored and the generated loops remain the fallback.
+### Music Packs
+
+Bundled or external music is configured through a TOML manifest named
+`music.toml`. Missing files are ignored and the generated loops remain the
+fallback.
+
+Example:
+
+```toml
+[[track]]
+title = "Night Bus Terminal"
+author = "Example Artist"
+file = "night-bus-terminal.ogg"
+license = "CC0"
+source = "https://example.invalid/source"
+```
+
+Paths are relative to the manifest file unless absolute. EutherEtcher searches:
+
+- `assets/music/music.toml` in a development checkout
+- `$XDG_DATA_HOME/eutheretcher/music/music.toml`
+- `~/.local/share/eutheretcher/music/music.toml`
+- `/usr/local/share/eutheretcher/music/music.toml`
+- `/usr/share/eutheretcher/music/music.toml`
+- bundled `assets/music/music.toml` next to an extracted release binary
+
+Only add music you are allowed to redistribute. Keep artist, license, and source
+metadata in the manifest so release packages preserve attribution.
 
 ## Notes
 

@@ -26,6 +26,7 @@ use crate::{
 };
 
 enum FlashEvent {
+    Status(String),
     Phase { name: String, total_bytes: u64 },
     Progress { done_bytes: u64, total_bytes: u64 },
     Finished(std::result::Result<(), String>),
@@ -334,15 +335,19 @@ impl EutherGui {
 
                 ui.label(RichText::new("1. Image").strong());
                 ui.horizontal(|ui| {
+                    if ui
+                        .add_sized([118.0, 24.0], egui::Button::new("Select image"))
+                        .clicked()
+                    {
+                        self.pick_image();
+                    }
+
+                    let text_width = (ui.available_width() - 8.0).max(220.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.image_path)
                             .hint_text("./archlinux.iso")
-                            .desired_width(f32::INFINITY),
+                            .desired_width(text_width),
                     );
-
-                    if ui.button("Select image").clicked() {
-                        self.pick_image();
-                    }
                 });
 
                 ui.add_space(10.0);
@@ -797,13 +802,9 @@ impl EutherGui {
 
         thread::spawn(move || {
             if !is_root() {
-                if !command_exists("pkexec") {
-                    let _ = sender.send(FlashEvent::Finished(Err(
-                        "root privileges are required and pkexec was not found".to_string(),
-                    )));
-                    return;
-                }
-
+                let _ = sender.send(FlashEvent::Status(
+                    "Waiting for administrator authorization. If no prompt appears, check your polkit agent.".to_string(),
+                ));
                 if let Err(err) = run_helper_with_pkexec(
                     &sender,
                     &image_path,
@@ -882,21 +883,16 @@ impl EutherGui {
     }
 
     fn unmount_selected_target(&mut self, device_path: String) {
-        if !command_exists("pkexec") {
-            self.last_error = Some("pkexec was not found".to_string());
-            return;
-        }
-
         match std::env::current_exe()
             .map_err(|err| err.to_string())
             .and_then(|exe| {
-                Command::new("pkexec")
+                let mut command = pkexec_command()?;
+                command
                     .arg(exe)
                     .arg("unmount-helper")
                     .arg("--device")
-                    .arg(&device_path)
-                    .output()
-                    .map_err(|err| err.to_string())
+                    .arg(&device_path);
+                command.output().map_err(|err| err.to_string())
             }) {
             Ok(output) if output.status.success() => {
                 self.status = "Target unmounted".to_string();
@@ -905,11 +901,8 @@ impl EutherGui {
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                self.last_error = Some(if stderr.is_empty() {
-                    "failed to unmount target".to_string()
-                } else {
-                    stderr
-                });
+                self.last_error =
+                    Some(privilege_error_message("failed to unmount target", &stderr));
             }
             Err(err) => {
                 self.last_error = Some(err);
@@ -1034,6 +1027,9 @@ impl EutherGui {
         let mut keep_receiver = true;
         while let Ok(event) = receiver.try_recv() {
             match event {
+                FlashEvent::Status(status) => {
+                    self.status = status;
+                }
                 FlashEvent::Phase { name, total_bytes } => {
                     self.phase_name = name.clone();
                     self.phase_done_bytes = 0;
@@ -1173,7 +1169,7 @@ fn run_helper_with_pkexec(
     helper_child: &Arc<Mutex<Option<Child>>>,
 ) -> std::result::Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
-    let mut command = Command::new("pkexec");
+    let mut command = pkexec_command()?;
     command
         .arg(exe)
         .arg("writer-helper")
@@ -1230,9 +1226,138 @@ fn run_helper_with_pkexec(
         Err(if stderr.is_empty() {
             "writer helper failed or authorization was cancelled".to_string()
         } else {
-            stderr
+            privilege_error_message(
+                "writer helper failed or authorization was cancelled",
+                &stderr,
+            )
         })
     }
+}
+
+fn pkexec_command() -> std::result::Result<Command, String> {
+    let Some(pkexec) = find_pkexec() else {
+        return Err(format!(
+            "root privileges are required, but no pkexec binary was found. Checked: {}",
+            pkexec_candidates().join(", ")
+        ));
+    };
+    let mut command = Command::new(pkexec);
+    pass_gui_environment(&mut command);
+    command.stdin(Stdio::null());
+    Ok(command)
+}
+
+fn find_pkexec() -> Option<String> {
+    if command_exists("pkexec") {
+        return Some("pkexec".to_string());
+    }
+
+    pkexec_candidates()
+        .into_iter()
+        .find(|candidate| PathBuf::from(candidate).is_file())
+        .map(str::to_string)
+}
+
+fn pkexec_candidates() -> Vec<&'static str> {
+    vec!["/usr/bin/pkexec", "/bin/pkexec", "/usr/local/bin/pkexec"]
+}
+
+fn pass_gui_environment(command: &mut Command) {
+    for key in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+}
+
+fn privilege_error_message(fallback: &str, stderr: &str) -> String {
+    if stderr.is_empty() {
+        return fallback.to_string();
+    }
+
+    let lower = stderr.to_lowercase();
+    if lower.contains("no authentication agent") || lower.contains("no polkit authentication agent")
+    {
+        return format!(
+            "{stderr}\n\nNo polkit authentication agent answered the request. {}",
+            polkit_agent_hint()
+        );
+    }
+
+    if lower.contains("not authorized") || lower.contains("authorization") {
+        return format!(
+            "{stderr}\n\nIf you are running from cargo, install the desktop policy and run /usr/local/bin/eutheretcher gui for the cleanest polkit prompt."
+        );
+    }
+
+    stderr.to_string()
+}
+
+fn polkit_agent_hint() -> String {
+    let found: Vec<&str> = known_polkit_agents()
+        .into_iter()
+        .filter(|agent| agent.is_available())
+        .map(|agent| agent.name)
+        .collect();
+
+    if found.is_empty() {
+        "No common agent binary was found. Install and start one of: KDE polkit agent, GNOME polkit agent, LXQt policykit agent, MATE polkit agent, or xfce-polkit.".to_string()
+    } else {
+        format!(
+            "Found common agent binaries: {}. Make sure one authentication agent is running in your desktop session.",
+            found.join(", ")
+        )
+    }
+}
+
+struct PolkitAgent {
+    name: &'static str,
+    command: &'static str,
+    paths: &'static [&'static str],
+}
+
+impl PolkitAgent {
+    fn is_available(&self) -> bool {
+        command_exists(self.command) || self.paths.iter().any(|path| PathBuf::from(path).is_file())
+    }
+}
+
+fn known_polkit_agents() -> Vec<PolkitAgent> {
+    vec![
+        PolkitAgent {
+            name: "KDE polkit agent",
+            command: "polkit-kde-authentication-agent-1",
+            paths: &["/usr/lib/polkit-kde-authentication-agent-1"],
+        },
+        PolkitAgent {
+            name: "GNOME polkit agent",
+            command: "polkit-gnome-authentication-agent-1",
+            paths: &[
+                "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1",
+                "/usr/libexec/polkit-gnome-authentication-agent-1",
+            ],
+        },
+        PolkitAgent {
+            name: "LXQt policykit agent",
+            command: "lxqt-policykit-agent",
+            paths: &["/usr/bin/lxqt-policykit-agent"],
+        },
+        PolkitAgent {
+            name: "MATE polkit agent",
+            command: "polkit-mate-authentication-agent-1",
+            paths: &["/usr/lib/polkit-mate/polkit-mate-authentication-agent-1"],
+        },
+        PolkitAgent {
+            name: "xfce-polkit",
+            command: "xfce-polkit",
+            paths: &["/usr/lib/xfce-polkit/xfce-polkit"],
+        },
+    ]
 }
 
 fn parse_helper_line(sender: &mpsc::Sender<FlashEvent>, line: &str) {

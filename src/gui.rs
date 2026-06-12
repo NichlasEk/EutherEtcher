@@ -279,57 +279,74 @@ impl Drop for EutherGui {
 }
 
 impl EutherGui {
+    fn visualizer_snapshot(&self) -> crate::music::MusicVisualizer {
+        self.music
+            .as_ref()
+            .map(|music| music.visualizer())
+            .unwrap_or(crate::music::MusicVisualizer {
+                beat: self.wave_phase,
+                pulse: 0.08,
+                volume: 0.0,
+                levels: [0.08; crate::music::VISUALIZER_BARS],
+                seed: 17,
+                active: false,
+            })
+    }
+
     fn cyber_background(&self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         if !rect.is_finite() {
             return;
         }
         let painter = ui.painter();
-        let phase = self.wave_phase;
+        let visualizer = self.visualizer_snapshot();
+        let audio_drive = (visualizer.pulse * (0.55 + visualizer.volume * 0.45)).clamp(0.0, 1.35);
+        let bass = visualizer.levels[..6]
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max);
+        let mids = visualizer.levels[6..12].iter().copied().sum::<f32>() / 6.0;
+        let highs = visualizer.levels[12..].iter().copied().sum::<f32>() / 6.0;
 
         painter.rect_filled(rect, 0.0, Color32::from_rgb(6, 8, 12));
 
-        let horizon = rect.top() + rect.height() * 0.64;
-        let grid_color = Color32::from_rgba_premultiplied(35, 210, 185, 38);
-        let magenta = Color32::from_rgba_premultiplied(210, 48, 180, 45);
-        let amber = Color32::from_rgba_premultiplied(245, 177, 66, 32);
+        let horizon = rect.top() + rect.height() * 0.61;
+        let vanishing = pos2(rect.center().x, horizon);
+        let road_top_half = rect.width() * 0.035;
+        let road_bottom_half = rect.width() * 0.58;
+        let cyan_alpha = (58.0 + bass * 95.0 + audio_drive * 55.0).clamp(40.0, 190.0) as u8;
+        let magenta_alpha = (44.0 + highs * 145.0).clamp(34.0, 205.0) as u8;
+        let amber_alpha = (54.0 + mids * 125.0).clamp(40.0, 190.0) as u8;
+        let cyan = Color32::from_rgba_premultiplied(35, 238, 211, cyan_alpha);
+        let magenta = Color32::from_rgba_premultiplied(222, 56, 190, magenta_alpha);
+        let amber = Color32::from_rgba_premultiplied(245, 177, 66, amber_alpha);
 
-        for i in 0..18 {
-            let t = i as f32 / 17.0;
-            let x = egui::lerp(rect.left()..=rect.right(), t);
-            painter.line_segment(
-                [pos2(rect.center().x, horizon), pos2(x, rect.bottom())],
-                Stroke::new(1.0, grid_color),
-            );
-        }
+        let sky_rect = egui::Rect::from_min_max(rect.left_top(), pos2(rect.right(), horizon));
+        painter.rect_filled(
+            sky_rect,
+            0.0,
+            Color32::from_rgba_premultiplied(7, 10, 15, 220),
+        );
 
-        for i in 0..14 {
-            let t = i as f32 / 13.0;
-            let y = horizon + (rect.bottom() - horizon) * t.powf(1.65);
-            painter.line_segment(
-                [pos2(rect.left(), y), pos2(rect.right(), y)],
-                Stroke::new(1.0, grid_color),
-            );
-        }
-
-        for i in 0..28 {
-            let width = 28.0 + ((i * 37) % 90) as f32;
-            let height = 34.0 + ((i * 53) % 170) as f32;
-            let x = rect.left() + i as f32 * (rect.width() + 80.0) / 28.0 - 40.0;
+        for i in 0..30 {
+            let width = 24.0 + ((i * 37) % 96) as f32;
+            let height = 40.0 + ((i * 53) % 180) as f32;
+            let x = rect.left() + i as f32 * (rect.width() + 70.0) / 30.0 - 35.0;
             let y = horizon - height;
             let building = egui::Rect::from_min_size(pos2(x, y), vec2(width, height));
             painter.rect_filled(
                 building,
                 0.0,
-                Color32::from_rgba_premultiplied(10, 16, 22, 205),
+                Color32::from_rgba_premultiplied(9, 14, 20, 225),
             );
 
-            if i % 3 == 0 {
+            if i % 4 == 0 {
                 painter.line_segment(
                     [building.left_top(), building.right_top()],
-                    Stroke::new(1.5, magenta),
+                    Stroke::new(1.4, magenta),
                 );
             }
+
             for window in 0..4 {
                 if (i + window) % 2 == 0 {
                     let wx = building.left() + 7.0 + window as f32 * 13.0;
@@ -338,23 +355,105 @@ impl EutherGui {
                         painter.rect_filled(
                             egui::Rect::from_min_size(pos2(wx, wy), vec2(4.0, 10.0)),
                             0.0,
-                            if window % 2 == 0 { amber } else { grid_color },
+                            if window % 2 == 0 { amber } else { cyan },
                         );
                     }
                 }
             }
         }
 
-        let scan_alpha = (22.0 + phase.sin().abs() * 18.0) as u8;
-        for i in 0..36 {
-            let y = rect.top() + i as f32 * rect.height() / 36.0;
-            painter.line_segment(
-                [pos2(rect.left(), y), pos2(rect.right(), y)],
-                Stroke::new(
-                    1.0,
-                    Color32::from_rgba_premultiplied(255, 255, 255, scan_alpha / 5),
-                ),
-            );
+        painter.line_segment(
+            [pos2(rect.left(), horizon), pos2(rect.right(), horizon)],
+            Stroke::new(
+                1.0 + mids * 2.0,
+                Color32::from_rgba_premultiplied(35, 238, 211, 96),
+            ),
+        );
+
+        let road_polygon = vec![
+            pos2(vanishing.x - road_top_half, horizon),
+            pos2(vanishing.x + road_top_half, horizon),
+            pos2(rect.center().x + road_bottom_half, rect.bottom()),
+            pos2(rect.center().x - road_bottom_half, rect.bottom()),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            road_polygon,
+            Color32::from_rgba_premultiplied(3, 6, 10, 190),
+            Stroke::new(1.0, Color32::from_rgba_premultiplied(35, 238, 211, 70)),
+        ));
+
+        for lane in -6..=6 {
+            let lane_position = lane as f32 / 6.0;
+            let level = visualizer.levels
+                [((lane + 6) as usize * 3) % crate::music::VISUALIZER_BARS]
+                .clamp(0.0, 1.0);
+            let mut points = Vec::with_capacity(42);
+            for step in 0..42 {
+                let t = step as f32 / 41.0;
+                let perspective = t.powf(1.72);
+                let y = horizon + (rect.bottom() - horizon) * perspective;
+                let half_width = egui::lerp(road_top_half..=road_bottom_half, perspective);
+                let wave =
+                    (visualizer.beat * 0.42 + t * std::f32::consts::TAU * 2.4 + lane as f32 * 0.48)
+                        .sin()
+                        * level
+                        * t.powf(1.35)
+                        * (18.0 + bass * 34.0);
+                points.push(pos2(vanishing.x + lane_position * half_width + wave, y));
+            }
+            let color = if lane % 3 == 0 { amber } else { cyan };
+            painter.add(egui::Shape::line(
+                points,
+                Stroke::new(0.7 + level * 1.8 + bass * 0.9, color),
+            ));
+        }
+
+        let flow = (visualizer.beat * 0.92 + self.wave_phase * 0.55).fract();
+        for stripe in 0..26 {
+            let raw = (stripe as f32 + flow) / 26.0;
+            let perspective = raw.powf(1.72);
+            let y = horizon + (rect.bottom() - horizon) * perspective;
+            let half_width = egui::lerp(road_top_half..=road_bottom_half, perspective);
+            let level =
+                visualizer.levels[(stripe * 5) % crate::music::VISUALIZER_BARS].clamp(0.0, 1.0);
+            let mut points = Vec::with_capacity(28);
+            for segment in 0..28 {
+                let side = segment as f32 / 27.0 * 2.0 - 1.0;
+                let local_wave =
+                    (visualizer.beat * 0.55 + side * std::f32::consts::TAU * 1.2 + raw * 9.0).sin()
+                        * (5.0 + level * 22.0)
+                        * perspective;
+                points.push(pos2(vanishing.x + side * half_width, y + local_wave));
+            }
+            let alpha = ((1.0 - raw).powf(0.25) * (50.0 + level * 155.0 + bass * 55.0))
+                .clamp(20.0, 225.0) as u8;
+            let stripe_color = if stripe % 3 == 0 {
+                Color32::from_rgba_premultiplied(245, 177, 66, alpha)
+            } else if stripe % 3 == 1 {
+                Color32::from_rgba_premultiplied(222, 56, 190, alpha)
+            } else {
+                Color32::from_rgba_premultiplied(35, 238, 211, alpha)
+            };
+            painter.add(egui::Shape::line(
+                points,
+                Stroke::new(0.8 + perspective * 3.1 + level * 1.7, stripe_color),
+            ));
+        }
+
+        for side in [-1.0_f32, 1.0] {
+            let mut rail = Vec::with_capacity(48);
+            for step in 0..48 {
+                let t = step as f32 / 47.0;
+                let perspective = t.powf(1.62);
+                let y = horizon + (rect.bottom() - horizon) * perspective;
+                let half_width = egui::lerp(road_top_half..=road_bottom_half, perspective);
+                let wave = (visualizer.beat * 0.38 + t * 8.0).sin() * bass * perspective * 26.0;
+                rail.push(pos2(vanishing.x + side * half_width + wave * side, y));
+            }
+            painter.add(egui::Shape::line(
+                rail,
+                Stroke::new(2.2 + audio_drive * 2.4, magenta),
+            ));
         }
     }
 
@@ -662,18 +761,7 @@ impl EutherGui {
         );
 
         let center = rect.center();
-        let visualizer = self
-            .music
-            .as_ref()
-            .map(|music| music.visualizer())
-            .unwrap_or(crate::music::MusicVisualizer {
-                beat: self.wave_phase,
-                pulse: 0.08,
-                volume: 0.0,
-                levels: [0.08; crate::music::VISUALIZER_BARS],
-                seed: 17,
-                active: false,
-            });
+        let visualizer = self.visualizer_snapshot();
         let audio_drive = (visualizer.pulse * (0.55 + visualizer.volume * 0.45)).clamp(0.0, 1.25);
         let glow_alpha = (18.0 + audio_drive * 70.0).min(105.0) as u8;
         let radius = rect.height().min(rect.width()) * 0.28;

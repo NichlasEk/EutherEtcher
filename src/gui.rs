@@ -1,5 +1,6 @@
 use std::{
-    io::{BufRead, BufReader},
+    fs::OpenOptions,
+    io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -123,6 +124,8 @@ impl Default for EutherGui {
 }
 
 pub fn run_gui() -> Result<()> {
+    install_gui_panic_hook();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]),
         ..Default::default()
@@ -136,6 +139,35 @@ pub fn run_gui() -> Result<()> {
     .map_err(|err| std::io::Error::other(err.to_string()))?;
 
     Ok(())
+}
+
+fn install_gui_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/eutheretcher-panic.log")
+        {
+            let _ = writeln!(
+                file,
+                "\nprocess={} thread={:?}\n{info}",
+                std::process::id(),
+                thread::current().id()
+            );
+        }
+        previous(info);
+    }));
+}
+
+fn log_gui_event(message: impl AsRef<str>) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/eutheretcher-gui.log")
+    {
+        let _ = writeln!(file, "{}", message.as_ref());
+    }
 }
 
 impl eframe::App for EutherGui {
@@ -364,11 +396,10 @@ impl EutherGui {
                         self.pick_image();
                     }
 
-                    let text_width = (ui.available_width() - 8.0).max(220.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.image_path)
                             .hint_text("./archlinux.iso")
-                            .desired_width(text_width),
+                            .desired_width(finite_width(ui, 220.0) - 8.0),
                     );
                 });
 
@@ -388,7 +419,7 @@ impl EutherGui {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.confirm_path)
                         .hint_text(self.selected_device.as_deref().unwrap_or("/dev/sdX"))
-                        .desired_width(f32::INFINITY),
+                        .desired_width(finite_width(ui, 220.0)),
                 );
                 if self.is_armed() {
                     ui.label(
@@ -425,7 +456,9 @@ impl EutherGui {
                 });
 
                 ui.add_space(14.0);
-                ui.add(egui::ProgressBar::new(self.progress).desired_width(f32::INFINITY));
+                ui.add(
+                    egui::ProgressBar::new(self.progress).desired_width(finite_width(ui, 220.0)),
+                );
                 ui.label(RichText::new(&self.status).color(Color32::from_rgb(213, 219, 215)));
                 if self.running && ui.button("Cancel").clicked() {
                     self.cancel_flash();
@@ -466,7 +499,7 @@ impl EutherGui {
     }
 
     fn signal_canvas(&mut self, ui: &mut egui::Ui) {
-        let desired = Vec2::new(ui.available_width(), 220.0);
+        let desired = Vec2::new(finite_width(ui, 320.0), 220.0);
         let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
         let painter = ui.painter_at(rect);
 
@@ -821,6 +854,7 @@ impl EutherGui {
     }
 
     fn start_flash(&mut self) {
+        log_gui_event("start_flash: entered");
         self.last_error = None;
         self.show_preflight = false;
 
@@ -890,9 +924,16 @@ impl EutherGui {
         self.phase_done_bytes = 0;
         self.phase_total_bytes = image_size;
         self.phase_started_at = Some(Instant::now());
+        log_gui_event(format!(
+            "start_flash: spawning worker image={} device={} size={}",
+            image_path.display(),
+            device_path.display(),
+            image_size
+        ));
 
         thread::spawn(move || {
             if !is_root() {
+                log_gui_event("flash_worker: non-root, starting pkexec helper");
                 let _ = sender.send(FlashEvent::Status(
                     "Waiting for administrator authorization. If no prompt appears, check your polkit agent.".to_string(),
                 ));
@@ -905,11 +946,13 @@ impl EutherGui {
                     force,
                     &helper_child,
                 ) {
+                    log_gui_event(format!("flash_worker: helper failed: {err}"));
                     let _ = sender.send(FlashEvent::Finished(Err(err)));
                 }
                 return;
             }
 
+            log_gui_event("flash_worker: root write path");
             let _ = sender.send(FlashEvent::Phase {
                 name: "Writing".to_string(),
                 total_bytes: image_size,
@@ -1049,7 +1092,7 @@ impl EutherGui {
                             } else {
                                 self.checksum_done_bytes as f32 / self.checksum_total_bytes as f32
                             })
-                            .desired_width(f32::INFINITY),
+                            .desired_width(finite_width(ui, 220.0)),
                         );
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -1096,7 +1139,7 @@ impl EutherGui {
                                 .map(|device| device.path.as_str())
                                 .unwrap_or("/dev/sdX"),
                         )
-                        .desired_width(f32::INFINITY),
+                        .desired_width(finite_width(ui, 220.0)),
                 );
 
                 if !confirm_ready {
@@ -1279,6 +1322,15 @@ fn format_duration(seconds: u64) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
+fn finite_width(ui: &egui::Ui, min_width: f32) -> f32 {
+    let width = ui.available_width();
+    if width.is_finite() {
+        width.max(min_width)
+    } else {
+        min_width
+    }
+}
+
 fn format_mountpoints(mountpoints: &[String]) -> String {
     if mountpoints.is_empty() {
         "-".to_string()
@@ -1342,6 +1394,7 @@ fn run_helper_with_pkexec(
     helper_child: &Arc<Mutex<Option<Child>>>,
 ) -> std::result::Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    log_gui_event(format!("run_helper_with_pkexec: exe={}", exe.display()));
     let mut command = pkexec_command()?;
     command
         .arg(exe)
@@ -1362,7 +1415,14 @@ fn run_helper_with_pkexec(
         command.arg("--force");
     }
 
-    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let mut child = command.spawn().map_err(|err| {
+        log_gui_event(format!("run_helper_with_pkexec: spawn failed: {err}"));
+        err.to_string()
+    })?;
+    log_gui_event(format!(
+        "run_helper_with_pkexec: spawned helper pid={}",
+        child.id()
+    ));
     let stdout = child
         .stdout
         .take()
@@ -1414,6 +1474,7 @@ fn pkexec_command() -> std::result::Result<Command, String> {
             pkexec_candidates().join(", ")
         ));
     };
+    log_gui_event(format!("pkexec_command: using {pkexec}"));
     let mut command = Command::new(pkexec);
     pass_gui_environment(&mut command);
     command.stdin(Stdio::null());

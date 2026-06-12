@@ -384,6 +384,23 @@ impl EutherGui {
                 if ui.button(music_label).clicked() {
                     self.toggle_music();
                 }
+
+                ui.add_space(6.0);
+                let changed = ui
+                    .add_sized(
+                        [120.0, 18.0],
+                        egui::Slider::new(&mut self.music_volume, 0.0..=1.0).show_value(false),
+                    )
+                    .changed();
+                ui.label(
+                    RichText::new(format!("{:.0}%", self.music_volume * 100.0))
+                        .font(FontId::monospace(12.0))
+                        .color(Color32::from_rgb(186, 196, 193)),
+                );
+                ui.label(RichText::new("Vol").color(Color32::from_rgb(148, 156, 154)));
+                if changed {
+                    self.apply_music_volume();
+                }
             });
         });
     }
@@ -613,24 +630,6 @@ impl EutherGui {
                             .color(Color32::from_rgb(148, 156, 154)),
                     );
                 }
-
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Music volume").color(Color32::from_rgb(148, 156, 154)));
-                    let changed = ui
-                        .add_sized(
-                            [150.0, 18.0],
-                            egui::Slider::new(&mut self.music_volume, 0.0..=0.35).show_value(false),
-                        )
-                        .changed();
-                    ui.label(
-                        RichText::new(format!("{:.0}%", self.music_volume * 100.0))
-                            .font(FontId::monospace(12.0))
-                            .color(Color32::from_rgb(148, 156, 154)),
-                    );
-                    if changed {
-                        self.apply_music_volume();
-                    }
-                });
 
                 if let Some(error) = &self.last_error {
                     ui.add_space(8.0);

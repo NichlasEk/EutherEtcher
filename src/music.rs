@@ -2,6 +2,7 @@ use std::{
     f32::consts::TAU,
     fs,
     fs::File,
+    io::Write,
     num::NonZero,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -103,11 +104,13 @@ impl AudioEngine {
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
         self.player.set_volume(self.volume);
+        log_music_event(format!("set_volume: {:.2}", self.volume));
     }
 
     fn restart_current_track(&mut self) {
         self.player.stop();
         self.player = Player::connect_new(self.device_sink.mixer());
+        self.player.set_volume(self.volume);
 
         if !self.file_tracks.is_empty() {
             let track = self.file_tracks[self.track_index % self.file_tracks.len()].clone();
@@ -125,10 +128,20 @@ impl AudioEngine {
                         source_label(&track.source)
                     );
                     let offset = Duration::from_secs_f32(track.start_offset_seconds.max(0.0));
+                    log_music_event(format!(
+                        "start_file: path={} volume={:.2} offset={:.2}",
+                        track.file.display(),
+                        self.volume,
+                        track.start_offset_seconds.max(0.0)
+                    ));
                     self.player
                         .append(source.skip_duration(offset).repeat_infinite());
                 }
-                Err(_) => {
+                Err(err) => {
+                    log_music_event(format!(
+                        "file_decode_failed: path={} error={err}",
+                        track.file.display()
+                    ));
                     self.restart_procedural();
                 }
             }
@@ -143,6 +156,10 @@ impl AudioEngine {
     fn restart_procedural(&mut self) {
         let track = TRACKS[self.track_index % TRACKS.len()];
         self.current_name = format!("{} (generated)", track.name);
+        log_music_event(format!(
+            "start_procedural: track={} volume={:.2}",
+            track.name, self.volume
+        ));
         self.player.append(CyberSource::new(track));
     }
 }
@@ -155,6 +172,16 @@ impl Drop for AudioEngine {
 
 pub fn default_music_volume() -> f32 {
     0.12
+}
+
+fn log_music_event(message: impl AsRef<str>) {
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/eutheretcher-audio.log")
+    {
+        let _ = writeln!(file, "{}", message.as_ref());
+    }
 }
 
 impl CyberTrack {

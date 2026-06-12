@@ -163,6 +163,8 @@ music_enabled = true
 music_volume = 0.12
 ```
 
+`music_volume` is stored as `0.0` to `1.0`, matching 0-100% in the GUI.
+
 ## Notes
 
 EutherEtcher uses `lsblk --json` for device discovery because that is the native

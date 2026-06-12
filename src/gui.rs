@@ -52,7 +52,6 @@ pub struct EutherGui {
     selected_device: Option<String>,
     selected_device_identity: Option<String>,
     image_path: String,
-    confirm_path: String,
     chunk_size_mib: u64,
     verify_after_write: bool,
     verify_source_checksum: bool,
@@ -91,7 +90,6 @@ impl Default for EutherGui {
             selected_device: None,
             selected_device_identity: None,
             image_path: String::new(),
-            confirm_path: String::new(),
             chunk_size_mib: default_chunk_size_mib(),
             verify_after_write: true,
             verify_source_checksum: false,
@@ -377,7 +375,6 @@ impl EutherGui {
         if response.interact(Sense::click()).clicked() {
             self.selected_device = Some(device.path.clone());
             self.selected_device_identity = Some(device.identity_fingerprint());
-            self.confirm_path.clear();
         }
     }
 
@@ -424,27 +421,6 @@ impl EutherGui {
                             .suffix(" MiB"),
                     );
                 });
-
-                ui.add_space(10.0);
-                ui.label(RichText::new("3. Arm").strong());
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.confirm_path)
-                        .hint_text(self.selected_device.as_deref().unwrap_or("/dev/sdX"))
-                        .desired_width(finite_width(ui, 220.0)),
-                );
-                if self.is_armed() {
-                    ui.label(
-                        RichText::new("ARMED")
-                            .font(FontId::monospace(14.0))
-                            .color(Color32::from_rgb(53, 224, 182)),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new("Flash stays locked until the target path matches.")
-                            .font(FontId::proportional(12.0))
-                            .color(Color32::from_rgb(148, 156, 154)),
-                    );
-                }
 
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
@@ -572,7 +548,12 @@ impl EutherGui {
         ui.horizontal(|ui| {
             self.step_badge(ui, "1", "Image", !self.image_path.trim().is_empty());
             self.step_badge(ui, "2", "Target", self.selected_device.is_some());
-            self.step_badge(ui, "3", "Flash", self.is_armed());
+            self.step_badge(
+                ui,
+                "3",
+                "Flash",
+                self.selected_device.is_some() && !self.image_path.trim().is_empty(),
+            );
         });
     }
 
@@ -729,12 +710,6 @@ impl EutherGui {
                 selected.path
             ))
         }
-    }
-
-    fn is_armed(&self) -> bool {
-        self.selected_device
-            .as_deref()
-            .is_some_and(|path| self.confirm_path.trim() == path)
     }
 
     fn dry_run(&mut self) {
@@ -915,11 +890,6 @@ impl EutherGui {
             }
         };
 
-        if self.confirm_path.trim() != device.path {
-            self.last_error = Some(format!("Type {} before flashing", device.path));
-            return;
-        }
-
         if let Err(err) = self.verify_selected_device_identity(&device) {
             self.last_error = Some(err);
             return;
@@ -1095,16 +1065,12 @@ impl EutherGui {
     fn preflight_window(&mut self, ctx: &egui::Context) {
         let device = self.selected_block_device().ok();
         let image = inspect_image(PathBuf::from(self.image_path.trim()).as_path()).ok();
-        let confirm_ready = device
-            .as_ref()
-            .is_some_and(|device| self.confirm_path.trim() == device.path);
         let checksum_ready = self.image_sha256_path.as_deref() == Some(self.image_path.trim())
             && self.checksum_status.is_some()
             && !self.checksum_running;
         let checksum_ok = checksum_ready
             && !matches!(self.checksum_status, Some(ChecksumStatus::Mismatch { .. }));
-        let can_flash =
-            !self.running && device.is_some() && image.is_some() && confirm_ready && checksum_ok;
+        let can_flash = !self.running && device.is_some() && image.is_some() && checksum_ok;
 
         egui::Window::new("Pre-flight")
             .collapsible(false)
@@ -1190,25 +1156,14 @@ impl EutherGui {
                 }
 
                 ui.add_space(12.0);
-                ui.label("Type the exact target path to enable flashing");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.confirm_path)
-                        .hint_text(
-                            device
-                                .as_ref()
-                                .map(|device| device.path.as_str())
-                                .unwrap_or("/dev/sdX"),
-                        )
-                        .desired_width(finite_width(ui, 220.0)),
+                ui.label(
+                    RichText::new(
+                        "Press Flash now to request administrator authorization through polkit.",
+                    )
+                    .color(Color32::from_rgb(148, 156, 154)),
                 );
 
-                if !confirm_ready {
-                    ui.label(
-                        RichText::new("Flash is locked until the target path matches exactly.")
-                            .color(Color32::from_rgb(245, 177, 66)),
-                    );
-                }
-                if confirm_ready && !checksum_ready {
+                if !checksum_ready {
                     ui.label(
                         RichText::new("Flash is locked until SHA256 pre-flight is complete.")
                             .color(Color32::from_rgb(245, 177, 66)),

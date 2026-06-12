@@ -32,6 +32,13 @@ enum FlashEvent {
     Finished(std::result::Result<(), String>),
 }
 
+enum ChecksumEvent {
+    Finished {
+        path: String,
+        result: std::result::Result<(String, ChecksumStatus), String>,
+    },
+}
+
 pub struct EutherGui {
     devices: Vec<BlockDevice>,
     selected_device: Option<String>,
@@ -56,6 +63,8 @@ pub struct EutherGui {
     image_sha256: Option<String>,
     image_sha256_path: Option<String>,
     checksum_status: Option<ChecksumStatus>,
+    checksum_receiver: Option<Receiver<ChecksumEvent>>,
+    checksum_running: bool,
     show_internal_drives: bool,
     music_enabled: bool,
     music: Option<AudioEngine>,
@@ -89,6 +98,8 @@ impl Default for EutherGui {
             image_sha256: None,
             image_sha256_path: None,
             checksum_status: None,
+            checksum_receiver: None,
+            checksum_running: false,
             show_internal_drives: false,
             music_enabled: true,
             music: None,
@@ -120,6 +131,7 @@ pub fn run_gui() -> Result<()> {
 impl eframe::App for EutherGui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_flash_events();
+        self.poll_checksum_events();
         self.handle_dropped_files(ctx);
         self.wave_phase = (self.wave_phase + 0.018) % std::f32::consts::TAU;
         ctx.request_repaint();
@@ -566,6 +578,8 @@ impl EutherGui {
             self.image_sha256 = None;
             self.image_sha256_path = None;
             self.checksum_status = None;
+            self.checksum_receiver = None;
+            self.checksum_running = false;
             self.last_error = None;
             self.status = "Image selected".to_string();
         }
@@ -586,6 +600,8 @@ impl EutherGui {
                 self.image_sha256 = None;
                 self.image_sha256_path = None;
                 self.checksum_status = None;
+                self.checksum_receiver = None;
+                self.checksum_running = false;
                 self.last_error = None;
                 self.status = "Image dropped".to_string();
                 break;
@@ -686,13 +702,8 @@ impl EutherGui {
 
         match self.validate_selection() {
             Ok((_image_size, _device_path)) => {
-                if let Err(err) = self.refresh_image_hash() {
-                    self.status = "Pre-flight failed".to_string();
-                    self.last_error = Some(err);
-                    return;
-                }
                 self.show_preflight = true;
-                self.status = "Review pre-flight confirmation".to_string();
+                self.start_checksum_if_needed();
             }
             Err(err) => {
                 self.status = "Pre-flight failed".to_string();
@@ -701,20 +712,32 @@ impl EutherGui {
         }
     }
 
-    fn refresh_image_hash(&mut self) -> std::result::Result<(), String> {
+    fn start_checksum_if_needed(&mut self) {
         let path = self.image_path.trim().to_string();
         if self.image_sha256_path.as_deref() == Some(path.as_str()) && self.image_sha256.is_some() {
-            return Ok(());
+            self.status = "Review pre-flight confirmation".to_string();
+            return;
         }
 
-        let hash = sha256_file(PathBuf::from(&path).as_path()).map_err(|err| err.to_string())?;
-        self.checksum_status = Some(
-            checksum_sidecar_status(PathBuf::from(&path).as_path(), &hash)
-                .map_err(|err| err.to_string())?,
-        );
-        self.image_sha256 = Some(hash);
-        self.image_sha256_path = Some(path);
-        Ok(())
+        self.image_sha256 = None;
+        self.image_sha256_path = None;
+        self.checksum_status = None;
+        self.checksum_running = true;
+        self.status = "Calculating image SHA256 for pre-flight".to_string();
+
+        let (sender, receiver) = mpsc::channel();
+        self.checksum_receiver = Some(receiver);
+
+        thread::spawn(move || {
+            let result = sha256_file(PathBuf::from(&path).as_path())
+                .map_err(|err| err.to_string())
+                .and_then(|hash| {
+                    checksum_sidecar_status(PathBuf::from(&path).as_path(), &hash)
+                        .map(|status| (hash, status))
+                        .map_err(|err| err.to_string())
+                });
+            let _ = sender.send(ChecksumEvent::Finished { path, result });
+        });
     }
 
     fn phase_status_line(&self) -> String {
@@ -763,6 +786,21 @@ impl EutherGui {
 
         if let Err(err) = self.verify_selected_device_identity(&device) {
             self.last_error = Some(err);
+            return;
+        }
+
+        if self.checksum_running
+            || self.image_sha256_path.as_deref() != Some(self.image_path.trim())
+            || self.image_sha256.is_none()
+        {
+            self.show_preflight = true;
+            self.last_error = Some("SHA256 pre-flight is still running".to_string());
+            return;
+        }
+
+        if matches!(self.checksum_status, Some(ChecksumStatus::Mismatch { .. })) {
+            self.show_preflight = true;
+            self.last_error = Some("SHA256 sidecar mismatch blocks flashing".to_string());
             return;
         }
 
@@ -916,7 +954,11 @@ impl EutherGui {
         let confirm_ready = device
             .as_ref()
             .is_some_and(|device| self.confirm_path.trim() == device.path);
-        let checksum_ok = !matches!(self.checksum_status, Some(ChecksumStatus::Mismatch { .. }));
+        let checksum_ready = self.image_sha256_path.as_deref() == Some(self.image_path.trim())
+            && self.image_sha256.is_some()
+            && !self.checksum_running;
+        let checksum_ok = checksum_ready
+            && !matches!(self.checksum_status, Some(ChecksumStatus::Mismatch { .. }));
         let can_flash =
             !self.running && device.is_some() && image.is_some() && confirm_ready && checksum_ok;
 
@@ -940,9 +982,19 @@ impl EutherGui {
                     detail_row(
                         ui,
                         "SHA256",
-                        self.image_sha256.as_deref().unwrap_or("not calculated"),
+                        if self.checksum_running {
+                            "calculating..."
+                        } else {
+                            self.image_sha256.as_deref().unwrap_or("not calculated")
+                        },
                     );
                     checksum_row(ui, self.checksum_status.as_ref());
+                    if self.checksum_running {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Calculating checksum without blocking the interface");
+                        });
+                    }
                 } else {
                     ui.label(
                         RichText::new("Image is invalid or missing")
@@ -989,6 +1041,12 @@ impl EutherGui {
                 if !confirm_ready {
                     ui.label(
                         RichText::new("Flash is locked until the target path matches exactly.")
+                            .color(Color32::from_rgb(245, 177, 66)),
+                    );
+                }
+                if confirm_ready && !checksum_ready {
+                    ui.label(
+                        RichText::new("Flash is locked until SHA256 pre-flight is complete.")
                             .color(Color32::from_rgb(245, 177, 66)),
                     );
                 }
@@ -1068,6 +1126,45 @@ impl EutherGui {
 
         if keep_receiver {
             self.receiver = Some(receiver);
+        }
+    }
+
+    fn poll_checksum_events(&mut self) {
+        let Some(receiver) = self.checksum_receiver.take() else {
+            return;
+        };
+
+        let mut keep_receiver = true;
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                ChecksumEvent::Finished { path, result } => {
+                    keep_receiver = false;
+                    if path != self.image_path.trim() {
+                        continue;
+                    }
+                    self.checksum_running = false;
+                    match result {
+                        Ok((hash, status)) => {
+                            self.image_sha256 = Some(hash);
+                            self.image_sha256_path = Some(path);
+                            self.checksum_status = Some(status);
+                            self.status = "Review pre-flight confirmation".to_string();
+                            self.last_error = None;
+                        }
+                        Err(err) => {
+                            self.image_sha256 = None;
+                            self.image_sha256_path = None;
+                            self.checksum_status = None;
+                            self.status = "Pre-flight failed".to_string();
+                            self.last_error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+
+        if keep_receiver {
+            self.checksum_receiver = Some(receiver);
         }
     }
 }

@@ -7,6 +7,8 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +26,7 @@ use crate::error::{EutherError, Result};
 
 const SAMPLE_RATE: u32 = 44_100;
 const CHANNELS: u16 = 2;
+pub const VISUALIZER_BARS: usize = 18;
 const TRACKS: [CyberTrack; 10] = [
     CyberTrack::new("Midnight Uplink", 72.0, 41.2, [0, 3, 7, 10], 11),
     CyberTrack::new("Chrome Alley", 78.0, 43.65, [0, 2, 7, 9], 23),
@@ -45,6 +48,7 @@ pub struct AudioEngine {
     mpv_applied_volume: Option<f32>,
     pipewire_started_at: Option<Instant>,
     pipewire_track_duration: Option<Duration>,
+    audio_envelope: Option<Arc<Mutex<Option<AudioEnvelope>>>>,
     track_index: usize,
     file_tracks: Vec<MusicTrack>,
     current_name: String,
@@ -107,6 +111,7 @@ impl AudioEngine {
             mpv_applied_volume: None,
             pipewire_started_at: None,
             pipewire_track_duration: None,
+            audio_envelope: None,
             track_index: random_index(track_count),
             file_tracks,
             current_name: String::new(),
@@ -124,6 +129,57 @@ impl AudioEngine {
 
     pub fn track_name(&self) -> &str {
         &self.current_name
+    }
+
+    pub fn visualizer(&self) -> MusicVisualizer {
+        let elapsed = self
+            .pipewire_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
+        let seed = self.current_name.bytes().fold(0_u32, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(byte as u32)
+        });
+        if let Some(envelope) = self
+            .audio_envelope
+            .as_ref()
+            .and_then(|envelope| envelope.lock().ok())
+            .and_then(|envelope| envelope.clone())
+        {
+            let amplitude = envelope.amplitude_at(elapsed);
+            let levels = envelope.levels_at(elapsed);
+            let local_peak = levels.iter().copied().fold(amplitude, f32::max);
+            let beat = elapsed * envelope.estimated_bpm / 60.0;
+            return MusicVisualizer {
+                beat,
+                pulse: (amplitude * 0.7 + local_peak * 0.3) * self.volume.clamp(0.0, 1.0),
+                volume: self.volume.clamp(0.0, 1.0),
+                levels,
+                seed,
+                active: self.pipewire_child.is_some(),
+            };
+        }
+
+        let bpm = 82.0 + (seed % 34) as f32;
+        let beat = elapsed * bpm / 60.0;
+        let kick = (1.0 - beat.fract()).powf(5.0);
+        let phrase = ((beat / 16.0).fract() * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+        let motion = self.volume.clamp(0.0, 1.0)
+            * if self.pipewire_child.is_some() {
+                1.0
+            } else {
+                0.25
+            };
+        MusicVisualizer {
+            beat,
+            pulse: (0.18 + kick * 0.72 + phrase * 0.18) * motion,
+            volume: self.volume.clamp(0.0, 1.0),
+            levels: std::array::from_fn(|index| {
+                let phase = beat * 0.9 + index as f32 * 0.41;
+                ((phase.sin() * 0.5 + 0.5) * (0.65 + phrase * 0.35)).clamp(0.0, 1.0)
+            }),
+            seed,
+            active: self.pipewire_child.is_some(),
+        }
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -291,6 +347,10 @@ impl AudioEngine {
             .arg("--input-terminal=no")
             .arg(format!("--input-ipc-server={}", socket.display()))
             .arg(format!("--volume={volume}"))
+            .arg(format!(
+                "--start={:.3}",
+                track.start_offset_seconds.max(0.0)
+            ))
             .arg(&track.file)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -310,6 +370,7 @@ impl AudioEngine {
                 self.mpv_applied_volume = None;
                 self.pipewire_started_at = Some(Instant::now());
                 self.pipewire_track_duration = None;
+                self.start_envelope_analysis(track.clone());
                 self.apply_mpv_volume();
                 true
             }
@@ -328,10 +389,35 @@ impl AudioEngine {
         }
         self.pipewire_started_at = None;
         self.pipewire_track_duration = None;
+        self.audio_envelope = None;
         if let Some(socket) = self.mpv_socket.take() {
             let _ = fs::remove_file(socket);
         }
         self.mpv_applied_volume = None;
+    }
+
+    fn start_envelope_analysis(&mut self, track: MusicTrack) {
+        let envelope = Arc::new(Mutex::new(None));
+        self.audio_envelope = Some(envelope.clone());
+        thread::spawn(move || {
+            let path = track.file.clone();
+            match analyze_audio_envelope(&track) {
+                Some(analysis) => {
+                    log_music_event(format!(
+                        "audio_envelope_ready: path={} bins={} duration={:.2}",
+                        path.display(),
+                        analysis.bins.len(),
+                        analysis.duration_seconds
+                    ));
+                    if let Ok(mut slot) = envelope.lock() {
+                        *slot = Some(analysis);
+                    }
+                }
+                None => {
+                    log_music_event(format!("audio_envelope_failed: path={}", path.display()));
+                }
+            }
+        });
     }
 
     fn apply_mpv_volume(&mut self) {
@@ -370,6 +456,128 @@ impl Drop for AudioEngine {
 
 pub fn default_music_volume() -> f32 {
     0.12
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MusicVisualizer {
+    pub beat: f32,
+    pub pulse: f32,
+    pub volume: f32,
+    pub levels: [f32; VISUALIZER_BARS],
+    pub seed: u32,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AudioEnvelope {
+    bins: Vec<f32>,
+    bin_seconds: f32,
+    duration_seconds: f32,
+    estimated_bpm: f32,
+}
+
+impl AudioEnvelope {
+    fn amplitude_at(&self, elapsed_seconds: f32) -> f32 {
+        if self.bins.is_empty() || self.duration_seconds <= 0.0 {
+            return 0.0;
+        }
+        let position = elapsed_seconds.rem_euclid(self.duration_seconds);
+        let exact = position / self.bin_seconds;
+        let index = exact.floor() as usize % self.bins.len();
+        let next = (index + 1) % self.bins.len();
+        let blend = exact.fract();
+        self.bins[index] * (1.0 - blend) + self.bins[next] * blend
+    }
+
+    fn levels_at(&self, elapsed_seconds: f32) -> [f32; VISUALIZER_BARS] {
+        std::array::from_fn(|index| {
+            let centered = index as f32 - (VISUALIZER_BARS as f32 - 1.0) * 0.5;
+            let time = elapsed_seconds + centered * self.bin_seconds * 1.35;
+            let current = self.amplitude_at(time);
+            let previous = self.amplitude_at(time - self.bin_seconds * 2.0);
+            let transient = (current - previous).max(0.0);
+            (current * 0.82 + transient * 1.8).clamp(0.0, 1.0)
+        })
+    }
+}
+
+fn analyze_audio_envelope(track: &MusicTrack) -> Option<AudioEnvelope> {
+    let file = File::open(&track.file).ok()?;
+    let source = Decoder::try_from(file).ok()?;
+    let sample_rate = source.sample_rate().get() as usize;
+    let channels = source.channels().get() as usize;
+    let bin_seconds = 1.0 / 30.0;
+    let samples_per_bin = ((sample_rate as f32 * bin_seconds) as usize * channels).max(channels);
+    let offset_samples =
+        (track.start_offset_seconds.max(0.0) * sample_rate as f32) as usize * channels;
+
+    let mut bins = Vec::new();
+    let mut sum = 0.0_f32;
+    let mut count = 0_usize;
+    let mut consumed = 0_usize;
+
+    for sample in source {
+        if consumed < offset_samples {
+            consumed += 1;
+            continue;
+        }
+
+        sum += sample * sample;
+        count += 1;
+        if count >= samples_per_bin {
+            bins.push((sum / count as f32).sqrt());
+            sum = 0.0;
+            count = 0;
+        }
+    }
+
+    if count > 0 {
+        bins.push((sum / count as f32).sqrt());
+    }
+
+    if bins.is_empty() {
+        return None;
+    }
+
+    let mut sorted = bins.clone();
+    sorted.sort_by(f32::total_cmp);
+    let high_index = ((sorted.len() as f32 * 0.92) as usize).min(sorted.len() - 1);
+    let normalizer = sorted[high_index].max(0.000_01);
+
+    for bin in &mut bins {
+        let normalized = (*bin / normalizer).clamp(0.0, 1.6);
+        *bin = normalized.powf(0.62).clamp(0.0, 1.0);
+    }
+
+    Some(AudioEnvelope {
+        duration_seconds: bins.len() as f32 * bin_seconds,
+        estimated_bpm: estimate_bpm(&bins, bin_seconds),
+        bins,
+        bin_seconds,
+    })
+}
+
+fn estimate_bpm(bins: &[f32], bin_seconds: f32) -> f32 {
+    if bins.len() < 32 {
+        return 92.0;
+    }
+
+    let mut best_bpm = 92.0;
+    let mut best_score = 0.0;
+    for bpm in 70..=132 {
+        let step = (60.0 / bpm as f32 / bin_seconds).round().max(1.0) as usize;
+        let score = bins
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % step == 0)
+            .map(|(_, value)| *value)
+            .sum::<f32>();
+        if score > best_score {
+            best_score = score;
+            best_bpm = bpm as f32;
+        }
+    }
+    best_bpm
 }
 
 fn log_music_event(message: impl AsRef<str>) {

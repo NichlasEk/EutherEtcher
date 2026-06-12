@@ -655,30 +655,61 @@ impl EutherGui {
         );
 
         let center = rect.center();
+        let visualizer = self
+            .music
+            .as_ref()
+            .map(|music| music.visualizer())
+            .unwrap_or(crate::music::MusicVisualizer {
+                beat: self.wave_phase,
+                pulse: 0.08,
+                volume: 0.0,
+                levels: [0.08; crate::music::VISUALIZER_BARS],
+                seed: 17,
+                active: false,
+            });
+        let audio_drive = (visualizer.pulse * (0.55 + visualizer.volume * 0.45)).clamp(0.0, 1.25);
+        let glow_alpha = (18.0 + audio_drive * 70.0).min(105.0) as u8;
         let radius = rect.height().min(rect.width()) * 0.28;
+        painter.circle_filled(
+            center,
+            radius * (0.45 + audio_drive * 0.18),
+            Color32::from_rgba_premultiplied(53, 180, 156, glow_alpha / 3),
+        );
         for ring in 0..4 {
-            let t = self.wave_phase + ring as f32 * 0.65;
-            let pulse = radius + t.sin().abs() * 18.0 + ring as f32 * 16.0;
-            let alpha = (95.0 - ring as f32 * 16.0).max(24.0) as u8;
+            let t = visualizer.beat * 0.8 + ring as f32 * 0.65;
+            let pulse = radius
+                + t.sin().abs() * (12.0 + audio_drive * 18.0)
+                + ring as f32 * (14.0 + audio_drive * 5.0);
+            let alpha = (60.0 + audio_drive * 95.0 - ring as f32 * 20.0).clamp(26.0, 180.0) as u8;
             painter.circle_stroke(
                 center,
                 pulse,
-                Stroke::new(2.0, Color32::from_rgba_premultiplied(53, 180, 156, alpha)),
+                Stroke::new(
+                    1.5 + audio_drive * 1.7,
+                    Color32::from_rgba_premultiplied(53, 220, 192, alpha),
+                ),
             );
         }
 
-        for index in 0..18 {
-            let x = rect.left() + 24.0 + index as f32 * (rect.width() - 48.0) / 17.0;
-            let y = center.y + ((index as f32 * 0.7 + self.wave_phase * 3.0).sin() * 36.0);
-            let height = 22.0 + ((index as f32 + self.wave_phase * 4.0).cos().abs() * 54.0);
+        for index in 0..crate::music::VISUALIZER_BARS {
+            let spread = (crate::music::VISUALIZER_BARS as f32 - 1.0).max(1.0);
+            let x = rect.left() + 24.0 + index as f32 * (rect.width() - 48.0) / spread;
+            let seed = ((visualizer.seed as usize + index * 37) % 11) as f32;
+            let level = visualizer.levels[index].clamp(0.0, 1.0);
+            let shaped = level.powf(0.72);
+            let y = center.y + ((visualizer.beat * 0.16 + index as f32 * 0.21).sin() * 5.0);
+            let height = 10.0 + shaped * (80.0 + audio_drive * 36.0);
+            let alpha = (85.0 + shaped * 140.0 + audio_drive * 35.0).min(255.0) as u8;
             let color = if index % 3 == 0 {
-                Color32::from_rgb(245, 177, 66)
+                Color32::from_rgba_premultiplied(245, 177, 66, alpha)
+            } else if visualizer.active {
+                Color32::from_rgba_premultiplied(53, 220, 192, alpha)
             } else {
-                Color32::from_rgb(53, 180, 156)
+                Color32::from_rgba_premultiplied(53, 180, 156, 130)
             };
             painter.line_segment(
                 [pos2(x, y - height / 2.0), pos2(x, y + height / 2.0)],
-                Stroke::new(3.0, color),
+                Stroke::new(1.8 + shaped * 2.8 + audio_drive * 0.8 + seed * 0.03, color),
             );
         }
 

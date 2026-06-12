@@ -25,7 +25,7 @@ use crate::{
         checksum_sidecar_status, inspect_image, read_sha256_sidecar, sha256_file_with_progress,
         ChecksumStatus,
     },
-    music::{default_music_volume, AudioEngine},
+    music::{default_music_volume, AudioEngine, MusicCue},
     safety::run_safety_checks,
     verify, writer,
 };
@@ -87,6 +87,8 @@ pub struct EutherGui {
     show_preflight: bool,
     last_device_refresh: Instant,
     device_signature: Vec<String>,
+    music_cue: MusicCue,
+    flash_succeeded: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -146,6 +148,8 @@ impl Default for EutherGui {
             show_preflight: false,
             last_device_refresh: Instant::now() - DEVICE_AUTO_REFRESH_INTERVAL,
             device_signature: Vec::new(),
+            music_cue: MusicCue::Neutral,
+            flash_succeeded: false,
         };
         app.refresh_devices();
         if app.music_enabled {
@@ -230,6 +234,7 @@ impl eframe::App for EutherGui {
         self.poll_flash_events();
         self.poll_checksum_events();
         self.auto_refresh_devices();
+        self.update_music_cue();
         if let Some(music) = &mut self.music {
             music.tick();
         }
@@ -637,6 +642,7 @@ impl EutherGui {
         if response.interact(Sense::click()).clicked() {
             self.selected_device = Some(device.path.clone());
             self.selected_device_identity = Some(device.identity_fingerprint());
+            self.flash_succeeded = false;
         }
     }
 
@@ -660,11 +666,15 @@ impl EutherGui {
                         self.pick_image();
                     }
 
-                    ui.add(
+                    let image_response = ui.add(
                         egui::TextEdit::singleline(&mut self.image_path)
                             .hint_text("./archlinux.iso")
                             .desired_width(finite_width(ui, 220.0) - 8.0),
                     );
+                    if image_response.changed() {
+                        self.reset_checksum_state();
+                        self.flash_succeeded = false;
+                    }
                 });
 
                 ui.add_space(10.0);
@@ -941,6 +951,7 @@ impl EutherGui {
         {
             self.image_path = path.display().to_string();
             self.reset_checksum_state();
+            self.flash_succeeded = false;
             self.last_error = None;
             self.status = "Image selected".to_string();
         }
@@ -959,6 +970,7 @@ impl EutherGui {
             if matches!(extension.as_deref(), Some("iso" | "img")) {
                 self.image_path = path.display().to_string();
                 self.reset_checksum_state();
+                self.flash_succeeded = false;
                 self.last_error = None;
                 self.status = "Image dropped".to_string();
                 break;
@@ -997,6 +1009,38 @@ impl EutherGui {
             music.next_track();
         } else if self.music_enabled {
             self.start_music();
+        }
+    }
+
+    fn update_music_cue(&mut self) {
+        if !self.music_enabled {
+            return;
+        }
+
+        let desired = if self.running {
+            MusicCue::Flashing
+        } else if self.flash_succeeded {
+            MusicCue::Success
+        } else if !self.image_path.trim().is_empty() && self.selected_device.is_some() {
+            MusicCue::Ready
+        } else if !self.image_path.trim().is_empty() {
+            MusicCue::ImageArmed
+        } else {
+            MusicCue::Neutral
+        };
+
+        if desired == self.music_cue {
+            return;
+        }
+        self.music_cue = desired;
+
+        if let Some(music) = &mut self.music {
+            music.play_cue(desired);
+        } else {
+            self.start_music();
+            if let Some(music) = &mut self.music {
+                music.play_cue(desired);
+            }
         }
     }
 
@@ -1301,6 +1345,7 @@ impl EutherGui {
         self.receiver = Some(receiver);
         self.cancel_flag = Some(cancel);
         self.running = true;
+        self.flash_succeeded = false;
         self.progress = 0.0;
         self.status = "Writing image".to_string();
         self.phase_name = "Writing".to_string();
@@ -1595,6 +1640,7 @@ impl EutherGui {
                     self.progress = if result.is_ok() { 1.0 } else { self.progress };
                     match result {
                         Ok(()) => {
+                            self.flash_succeeded = true;
                             if self.phase_name == "Verifying" {
                                 self.phase_done_bytes = self.phase_total_bytes;
                                 self.status = "Verified".to_string();
@@ -1604,6 +1650,7 @@ impl EutherGui {
                             self.last_error = None;
                         }
                         Err(err) => {
+                            self.flash_succeeded = false;
                             self.status = "Flash failed".to_string();
                             self.last_error = Some(err);
                         }

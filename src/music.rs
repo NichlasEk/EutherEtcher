@@ -27,6 +27,15 @@ use crate::error::{EutherError, Result};
 const SAMPLE_RATE: u32 = 44_100;
 const CHANNELS: u16 = 2;
 pub const VISUALIZER_BARS: usize = 18;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusicCue {
+    Neutral,
+    ImageArmed,
+    Ready,
+    Flashing,
+    Success,
+}
+
 const TRACKS: [CyberTrack; 10] = [
     CyberTrack::new("Midnight Uplink", 72.0, 41.2, [0, 3, 7, 10], 11),
     CyberTrack::new("Chrome Alley", 78.0, 43.65, [0, 2, 7, 9], 23),
@@ -124,6 +133,17 @@ impl AudioEngine {
     pub fn next_track(&mut self) {
         let track_count = self.file_tracks.len().max(TRACKS.len());
         self.track_index = (self.track_index + 1 + random_index(track_count)) % track_count;
+        self.restart_current_track();
+    }
+
+    pub fn play_cue(&mut self, cue: MusicCue) {
+        let Some(index) = self.track_index_for_cue(cue) else {
+            return;
+        };
+        if self.track_index == index {
+            return;
+        }
+        self.track_index = index;
         self.restart_current_track();
     }
 
@@ -317,6 +337,40 @@ impl AudioEngine {
         if let Some(player) = &self.player {
             player.append(ProbeSource::new(CyberSource::new(track), "procedural"));
         }
+    }
+
+    fn track_index_for_cue(&self, cue: MusicCue) -> Option<usize> {
+        if self.file_tracks.is_empty() {
+            let index = match cue {
+                MusicCue::Neutral => 2,
+                MusicCue::ImageArmed => 4,
+                MusicCue::Ready => 7,
+                MusicCue::Flashing => 9,
+                MusicCue::Success => 5,
+            };
+            return Some(index % TRACKS.len());
+        }
+
+        let preferred = match cue {
+            MusicCue::Neutral => &["ambient", "crystal", "factory", "space"][..],
+            MusicCue::ImageArmed => &["crystal", "ambient", "factory", "space"][..],
+            MusicCue::Ready => &["factory", "space", "crystal", "ambient"][..],
+            MusicCue::Flashing => &["space", "factory", "crystal", "ambient"][..],
+            MusicCue::Success => &["crystal", "space", "ambient", "factory"][..],
+        };
+
+        for needle in preferred {
+            if let Some(index) = self.file_tracks.iter().position(|track| {
+                track
+                    .title
+                    .to_ascii_lowercase()
+                    .contains(&needle.to_ascii_lowercase())
+            }) {
+                return Some(index);
+            }
+        }
+
+        Some(0)
     }
 
     fn ensure_rodio(&mut self) -> Result<()> {

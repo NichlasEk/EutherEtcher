@@ -201,9 +201,10 @@ refresh is still available through the `Refresh devices` button.
 
 ## Music And Visuals
 
-The GUI ships with a small real OGG music pack, picks one track at startup,
-loops it continuously, and exposes music on/off, next-track, and volume
-controls.
+The GUI ships with a small real OGG music pack, loops music continuously, and
+exposes music on/off, next-track, and volume controls. Music changes with the
+workflow state: neutral idle, image armed, ready to flash, active
+write/verification, and successful completion each get their own cue.
 
 On Linux, music playback uses `mpv` with PipeWire output and JSON IPC for live
 volume control. The old procedural synth loops remain only as a fallback when no

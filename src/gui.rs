@@ -19,7 +19,7 @@ use crate::{
     config::default_chunk_size_mib,
     device::{find_device, flatten_visible_devices, list_devices, BlockDevice},
     error::Result,
-    image::{checksum_sidecar_status, inspect_image, sha256_file, ChecksumStatus},
+    image::{checksum_sidecar_status, inspect_image, sha256_file_with_progress, ChecksumStatus},
     music::AudioEngine,
     safety::run_safety_checks,
     verify, writer,
@@ -33,6 +33,10 @@ enum FlashEvent {
 }
 
 enum ChecksumEvent {
+    Progress {
+        done_bytes: u64,
+        total_bytes: u64,
+    },
     Finished {
         path: String,
         result: std::result::Result<(String, ChecksumStatus), String>,
@@ -65,6 +69,9 @@ pub struct EutherGui {
     checksum_status: Option<ChecksumStatus>,
     checksum_receiver: Option<Receiver<ChecksumEvent>>,
     checksum_running: bool,
+    checksum_done_bytes: u64,
+    checksum_total_bytes: u64,
+    checksum_started_at: Option<Instant>,
     show_internal_drives: bool,
     music_enabled: bool,
     music: Option<AudioEngine>,
@@ -100,6 +107,9 @@ impl Default for EutherGui {
             checksum_status: None,
             checksum_receiver: None,
             checksum_running: false,
+            checksum_done_bytes: 0,
+            checksum_total_bytes: 0,
+            checksum_started_at: None,
             show_internal_drives: false,
             music_enabled: true,
             music: None,
@@ -580,6 +590,9 @@ impl EutherGui {
             self.checksum_status = None;
             self.checksum_receiver = None;
             self.checksum_running = false;
+            self.checksum_done_bytes = 0;
+            self.checksum_total_bytes = 0;
+            self.checksum_started_at = None;
             self.last_error = None;
             self.status = "Image selected".to_string();
         }
@@ -602,6 +615,9 @@ impl EutherGui {
                 self.checksum_status = None;
                 self.checksum_receiver = None;
                 self.checksum_running = false;
+                self.checksum_done_bytes = 0;
+                self.checksum_total_bytes = 0;
+                self.checksum_started_at = None;
                 self.last_error = None;
                 self.status = "Image dropped".to_string();
                 break;
@@ -701,9 +717,9 @@ impl EutherGui {
         self.last_error = None;
 
         match self.validate_selection() {
-            Ok((_image_size, _device_path)) => {
+            Ok((image_size, _device_path)) => {
                 self.show_preflight = true;
-                self.start_checksum_if_needed();
+                self.start_checksum_if_needed(image_size);
             }
             Err(err) => {
                 self.status = "Pre-flight failed".to_string();
@@ -712,7 +728,7 @@ impl EutherGui {
         }
     }
 
-    fn start_checksum_if_needed(&mut self) {
+    fn start_checksum_if_needed(&mut self, total_bytes: u64) {
         let path = self.image_path.trim().to_string();
         if self.image_sha256_path.as_deref() == Some(path.as_str()) && self.image_sha256.is_some() {
             self.status = "Review pre-flight confirmation".to_string();
@@ -723,19 +739,28 @@ impl EutherGui {
         self.image_sha256_path = None;
         self.checksum_status = None;
         self.checksum_running = true;
+        self.checksum_done_bytes = 0;
+        self.checksum_total_bytes = total_bytes;
+        self.checksum_started_at = Some(Instant::now());
+        self.progress = 0.0;
         self.status = "Calculating image SHA256 for pre-flight".to_string();
 
         let (sender, receiver) = mpsc::channel();
         self.checksum_receiver = Some(receiver);
 
         thread::spawn(move || {
-            let result = sha256_file(PathBuf::from(&path).as_path())
-                .map_err(|err| err.to_string())
-                .and_then(|hash| {
-                    checksum_sidecar_status(PathBuf::from(&path).as_path(), &hash)
-                        .map(|status| (hash, status))
-                        .map_err(|err| err.to_string())
+            let result = sha256_file_with_progress(PathBuf::from(&path).as_path(), |done| {
+                let _ = sender.send(ChecksumEvent::Progress {
+                    done_bytes: done,
+                    total_bytes,
                 });
+            })
+            .map_err(|err| err.to_string())
+            .and_then(|hash| {
+                checksum_sidecar_status(PathBuf::from(&path).as_path(), &hash)
+                    .map(|status| (hash, status))
+                    .map_err(|err| err.to_string())
+            });
             let _ = sender.send(ChecksumEvent::Finished { path, result });
         });
     }
@@ -762,6 +787,34 @@ impl EutherGui {
             self.phase_name,
             format_bytes(self.phase_done_bytes),
             format_bytes(self.phase_total_bytes),
+            format_bytes(speed as u64),
+            eta
+        )
+    }
+
+    fn checksum_status_line(&self) -> String {
+        let elapsed = self
+            .checksum_started_at
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let speed = if elapsed > 0.0 {
+            self.checksum_done_bytes as f64 / elapsed
+        } else {
+            0.0
+        };
+        let remaining = self
+            .checksum_total_bytes
+            .saturating_sub(self.checksum_done_bytes);
+        let eta = if speed > 0.0 {
+            format_duration((remaining as f64 / speed).round() as u64)
+        } else {
+            "--:--".to_string()
+        };
+
+        format!(
+            "Checksum  {} / {}  {}/s  ETA {}",
+            format_bytes(self.checksum_done_bytes),
+            format_bytes(self.checksum_total_bytes),
             format_bytes(speed as u64),
             eta
         )
@@ -990,9 +1043,17 @@ impl EutherGui {
                     );
                     checksum_row(ui, self.checksum_status.as_ref());
                     if self.checksum_running {
+                        ui.add(
+                            egui::ProgressBar::new(if self.checksum_total_bytes == 0 {
+                                0.0
+                            } else {
+                                self.checksum_done_bytes as f32 / self.checksum_total_bytes as f32
+                            })
+                            .desired_width(f32::INFINITY),
+                        );
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Calculating checksum without blocking the interface");
+                            ui.label(self.checksum_status_line());
                         });
                     }
                 } else {
@@ -1137,12 +1198,27 @@ impl EutherGui {
         let mut keep_receiver = true;
         while let Ok(event) = receiver.try_recv() {
             match event {
+                ChecksumEvent::Progress {
+                    done_bytes,
+                    total_bytes,
+                } => {
+                    self.checksum_done_bytes = done_bytes;
+                    self.checksum_total_bytes = total_bytes;
+                    self.progress = if total_bytes == 0 {
+                        0.0
+                    } else {
+                        done_bytes as f32 / total_bytes as f32
+                    };
+                    self.status = self.checksum_status_line();
+                }
                 ChecksumEvent::Finished { path, result } => {
                     keep_receiver = false;
                     if path != self.image_path.trim() {
                         continue;
                     }
                     self.checksum_running = false;
+                    self.checksum_done_bytes = self.checksum_total_bytes;
+                    self.progress = 1.0;
                     match result {
                         Ok((hash, status)) => {
                             self.image_sha256 = Some(hash);

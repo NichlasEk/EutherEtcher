@@ -44,10 +44,14 @@ pub fn inspect_image(path: &Path) -> Result<ImageInfo> {
     })
 }
 
-pub fn sha256_file(path: &Path) -> Result<String> {
+pub fn sha256_file_with_progress<F>(path: &Path, mut on_progress: F) -> Result<String>
+where
+    F: FnMut(u64),
+{
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut done = 0_u64;
 
     loop {
         let read = file.read(&mut buffer)?;
@@ -55,6 +59,8 @@ pub fn sha256_file(path: &Path) -> Result<String> {
             break;
         }
         hasher.update(&buffer[..read]);
+        done += read as u64;
+        on_progress(done);
     }
 
     Ok(format!("{:x}", hasher.finalize()))

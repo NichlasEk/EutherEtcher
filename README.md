@@ -10,6 +10,7 @@ than risk writing to the wrong disk.
 
 ```bash
 eutheretcher list
+eutheretcher list --show-internal-drives
 eutheretcher flash --image ./file.iso --device /dev/sdX
 eutheretcher flash --config ./eutheretcher.toml
 eutheretcher verify --image ./file.iso --device /dev/sdX
@@ -27,6 +28,10 @@ Before flashing, EutherEtcher performs basic checks:
 - Refuses when the image is larger than the target device.
 - Runs `sync` after writing.
 - Supports a dry-run mode before writing.
+- Hides loop devices by default.
+- Hides internal SATA/NVMe drives unless explicitly requested.
+- Marks internal SATA/NVMe drives as `DANGER`.
+- Highlights removable USB/SD-style targets as the normal path.
 
 Run `eutheretcher list` and inspect the device path carefully before flashing.
 
@@ -69,6 +74,10 @@ cargo run -- gui
 
 It uses the same safety checks as the CLI. Flashing from the GUI still requires
 typing the exact target device path.
+
+The GUI starts a built-in procedural cyberpunk loop by default. It includes ten
+free generated loops, picks one at startup, loops it continuously, and exposes
+music on/off plus next-loop controls.
 
 ## Notes
 

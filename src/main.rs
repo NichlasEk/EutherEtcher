@@ -3,6 +3,7 @@ mod device;
 mod error;
 mod gui;
 mod image;
+mod music;
 mod safety;
 mod verify;
 mod writer;
@@ -13,7 +14,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::{
     config::{default_chunk_size_mib, Config},
-    device::{find_device, flatten_devices, list_devices},
+    device::{find_device, flatten_visible_devices, list_devices},
     error::{EutherError, Result},
     image::inspect_image,
     safety::{confirm_write, run_safety_checks},
@@ -29,10 +30,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    List,
+    List(ListArgs),
     Flash(FlashArgs),
     Verify(VerifyArgs),
     Gui,
+}
+
+#[derive(Debug, Args)]
+struct ListArgs {
+    #[arg(long)]
+    show_internal_drives: bool,
+    #[arg(long)]
+    show_loops: bool,
 }
 
 #[derive(Debug, Args)]
@@ -72,28 +81,34 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::List => list_command(),
+        Command::List(args) => list_command(args),
         Command::Flash(args) => flash_command(args),
         Command::Verify(args) => verify_command(args),
         Command::Gui => gui::run_gui(),
     }
 }
 
-fn list_command() -> Result<()> {
+fn list_command(args: ListArgs) -> Result<()> {
     let devices = list_devices()?;
     let mut flat = Vec::new();
-    flatten_devices(&devices, &mut flat);
+    flatten_visible_devices(
+        &devices,
+        &mut flat,
+        args.show_internal_drives,
+        args.show_loops,
+    );
 
     println!(
-        "{:<12} {:<10} {:<8} {:<6} {:<28} {:<24} NAME",
-        "PATH", "SIZE", "TRAN", "TYPE", "MODEL", "MOUNTPOINTS"
+        "{:<12} {:<10} {:<10} {:<8} {:<6} {:<28} {:<24} NAME",
+        "PATH", "SIZE", "RISK", "TRAN", "TYPE", "MODEL", "MOUNTPOINTS"
     );
 
     for device in flat {
         println!(
-            "{:<12} {:<10} {:<8} {:<6} {:<28} {:<24} {}",
+            "{:<12} {:<10} {:<10} {:<8} {:<6} {:<28} {:<24} {}",
             device.path,
             format_size(device.size_bytes),
+            device.risk_label(),
             device.transport.as_deref().unwrap_or("-"),
             device.kind,
             truncate(device.model.as_deref().unwrap_or("-"), 28),

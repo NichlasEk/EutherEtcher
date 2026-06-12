@@ -34,6 +34,9 @@ pub enum EutherError {
 
     #[error("verification failed at byte offset {offset}")]
     VerificationFailed { offset: u64 },
+
+    #[error("audio error: {0}")]
+    Audio(String),
 }
 
 pub type Result<T> = std::result::Result<T, EutherError>;

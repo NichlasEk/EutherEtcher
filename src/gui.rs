@@ -10,9 +10,10 @@ use eframe::egui::{
 
 use crate::{
     config::default_chunk_size_mib,
-    device::{find_device, flatten_devices, list_devices, BlockDevice},
+    device::{find_device, flatten_visible_devices, list_devices, BlockDevice},
     error::Result,
     image::inspect_image,
+    music::AudioEngine,
     safety::run_safety_checks,
     verify, writer,
 };
@@ -37,6 +38,10 @@ pub struct EutherGui {
     running: bool,
     receiver: Option<Receiver<FlashEvent>>,
     wave_phase: f32,
+    show_internal_drives: bool,
+    music_enabled: bool,
+    music: Option<AudioEngine>,
+    music_error: Option<String>,
 }
 
 impl Default for EutherGui {
@@ -55,8 +60,13 @@ impl Default for EutherGui {
             running: false,
             receiver: None,
             wave_phase: 0.0,
+            show_internal_drives: false,
+            music_enabled: true,
+            music: None,
+            music_error: None,
         };
         app.refresh_devices();
+        app.start_music();
         app
     }
 }
@@ -127,6 +137,19 @@ impl EutherGui {
                 {
                     self.refresh_devices();
                 }
+
+                if ui.button("Next loop").clicked() {
+                    self.next_music_track();
+                }
+
+                let music_label = if self.music_enabled {
+                    "Music on"
+                } else {
+                    "Music off"
+                };
+                if ui.button(music_label).clicked() {
+                    self.toggle_music();
+                }
             });
         });
     }
@@ -138,11 +161,23 @@ impl EutherGui {
             .inner_margin(16.0)
             .show(ui, |ui| {
                 ui.heading("2. Target");
+                ui.checkbox(&mut self.show_internal_drives, "Show internal drives");
+                if self.show_internal_drives {
+                    ui.label(
+                        RichText::new("Internal SATA/NVMe drives are marked DANGER.")
+                            .color(Color32::from_rgb(245, 119, 98)),
+                    );
+                }
                 ui.add_space(8.0);
 
                 let flat = {
                     let mut refs = Vec::new();
-                    flatten_devices(&self.devices, &mut refs);
+                    flatten_visible_devices(
+                        &self.devices,
+                        &mut refs,
+                        self.show_internal_drives,
+                        false,
+                    );
                     refs.into_iter().cloned().collect::<Vec<_>>()
                 };
 
@@ -155,7 +190,9 @@ impl EutherGui {
 
     fn device_row(&mut self, ui: &mut egui::Ui, device: &BlockDevice) {
         let selected = self.selected_device.as_deref() == Some(device.path.as_str());
-        let color = if device.kind == "disk" {
+        let color = if device.is_dangerous_internal() {
+            Color32::from_rgb(245, 83, 70)
+        } else if device.is_removable_target() {
             Color32::from_rgb(53, 180, 156)
         } else {
             Color32::from_rgb(128, 133, 134)
@@ -163,14 +200,22 @@ impl EutherGui {
 
         let response = egui::Frame::default()
             .fill(if selected {
-                Color32::from_rgb(38, 64, 59)
+                if device.is_dangerous_internal() {
+                    Color32::from_rgb(76, 35, 35)
+                } else {
+                    Color32::from_rgb(38, 64, 59)
+                }
             } else {
                 Color32::from_rgb(29, 33, 35)
             })
             .stroke(Stroke::new(
                 1.0,
                 if selected {
-                    Color32::from_rgb(75, 220, 190)
+                    if device.is_dangerous_internal() {
+                        Color32::from_rgb(245, 83, 70)
+                    } else {
+                        Color32::from_rgb(75, 220, 190)
+                    }
                 } else {
                     Color32::from_rgb(48, 55, 57)
                 },
@@ -188,7 +233,8 @@ impl EutherGui {
                         );
                         ui.label(
                             RichText::new(format!(
-                                "{}  {}  {}",
+                                "{}  {}  {}  {}",
+                                device.risk_label(),
                                 format_size(device.size_bytes),
                                 device.transport.as_deref().unwrap_or("unknown"),
                                 device.model.as_deref().unwrap_or("unknown")
@@ -267,6 +313,18 @@ impl EutherGui {
                 ui.add_space(14.0);
                 ui.add(egui::ProgressBar::new(self.progress).desired_width(f32::INFINITY));
                 ui.label(RichText::new(&self.status).color(Color32::from_rgb(213, 219, 215)));
+
+                if let Some(music) = &self.music {
+                    ui.label(
+                        RichText::new(format!("Loop: {}", music.track_name()))
+                            .color(Color32::from_rgb(245, 177, 66)),
+                    );
+                } else if let Some(error) = &self.music_error {
+                    ui.label(
+                        RichText::new(format!("Music unavailable: {error}"))
+                            .color(Color32::from_rgb(148, 156, 154)),
+                    );
+                }
 
                 if let Some(error) = &self.last_error {
                     ui.add_space(8.0);
@@ -390,6 +448,39 @@ impl EutherGui {
                 self.last_error = Some(err.to_string());
                 self.status = "Could not refresh devices".to_string();
             }
+        }
+    }
+
+    fn start_music(&mut self) {
+        match AudioEngine::start_random() {
+            Ok(engine) => {
+                self.music = Some(engine);
+                self.music_enabled = true;
+                self.music_error = None;
+            }
+            Err(err) => {
+                self.music = None;
+                self.music_enabled = false;
+                self.music_error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn toggle_music(&mut self) {
+        if self.music_enabled {
+            self.music = None;
+            self.music_enabled = false;
+        } else {
+            self.music_enabled = true;
+            self.start_music();
+        }
+    }
+
+    fn next_music_track(&mut self) {
+        if let Some(music) = &mut self.music {
+            music.next_track();
+        } else if self.music_enabled {
+            self.start_music();
         }
     }
 

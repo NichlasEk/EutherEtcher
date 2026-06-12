@@ -79,10 +79,35 @@ pub fn find_device<'a>(devices: &'a [BlockDevice], path: &str) -> Option<&'a Blo
     None
 }
 
-pub fn flatten_devices<'a>(devices: &'a [BlockDevice], out: &mut Vec<&'a BlockDevice>) {
+pub fn flatten_visible_devices<'a>(
+    devices: &'a [BlockDevice],
+    out: &mut Vec<&'a BlockDevice>,
+    show_internal_drives: bool,
+    show_loops: bool,
+) {
+    flatten_visible_devices_with_parent(devices, out, show_internal_drives, show_loops, false);
+}
+
+fn flatten_visible_devices_with_parent<'a>(
+    devices: &'a [BlockDevice],
+    out: &mut Vec<&'a BlockDevice>,
+    show_internal_drives: bool,
+    show_loops: bool,
+    parent_visible: bool,
+) {
     for device in devices {
-        out.push(device);
-        flatten_devices(&device.children, out);
+        let visible = device.is_visible_candidate(show_internal_drives, show_loops, parent_visible);
+        if visible {
+            out.push(device);
+        }
+
+        flatten_visible_devices_with_parent(
+            &device.children,
+            out,
+            show_internal_drives,
+            show_loops,
+            visible,
+        );
     }
 }
 
@@ -98,6 +123,51 @@ impl BlockDevice {
     pub fn is_likely_internal(&self) -> bool {
         matches!(self.transport.as_deref(), Some("sata" | "nvme" | "ata"))
             || (!self.removable && self.transport.as_deref() != Some("usb"))
+    }
+
+    pub fn is_loop(&self) -> bool {
+        self.kind == "loop" || self.path.starts_with("/dev/loop")
+    }
+
+    pub fn is_removable_target(&self) -> bool {
+        self.kind == "disk"
+            && !self.is_loop()
+            && (self.removable || matches!(self.transport.as_deref(), Some("usb" | "mmc")))
+    }
+
+    pub fn is_dangerous_internal(&self) -> bool {
+        self.kind == "disk"
+            && !self.is_loop()
+            && matches!(self.transport.as_deref(), Some("sata" | "nvme" | "ata"))
+    }
+
+    pub fn is_visible_candidate(
+        &self,
+        show_internal_drives: bool,
+        show_loops: bool,
+        parent_visible: bool,
+    ) -> bool {
+        if self.is_loop() {
+            return show_loops;
+        }
+
+        if self.is_dangerous_internal() {
+            return show_internal_drives;
+        }
+
+        self.is_removable_target() || (self.kind == "part" && parent_visible)
+    }
+
+    pub fn risk_label(&self) -> &'static str {
+        if self.is_dangerous_internal() {
+            "DANGER"
+        } else if self.is_removable_target() {
+            "REMOVABLE"
+        } else if self.is_loop() {
+            "LOOP"
+        } else {
+            "OTHER"
+        }
     }
 }
 
@@ -202,5 +272,82 @@ mod tests {
 
         assert_eq!(found.name, "sdb1");
         assert_eq!(found.kind, "part");
+    }
+
+    #[test]
+    fn hides_loop_devices_by_default() {
+        let mut loop_device = test_disk("/dev/loop0", "loop", None, false);
+        loop_device.kind = "loop".to_string();
+        let devices = vec![loop_device];
+        let mut visible = Vec::new();
+
+        flatten_visible_devices(&devices, &mut visible, false, false);
+        assert!(visible.is_empty());
+
+        flatten_visible_devices(&devices, &mut visible, false, true);
+        assert_eq!(visible.len(), 1);
+    }
+
+    #[test]
+    fn hides_internal_sata_and_nvme_without_opt_in() {
+        let devices = vec![
+            test_disk("/dev/sda", "disk", Some("sata"), false),
+            test_disk("/dev/nvme0n1", "disk", Some("nvme"), false),
+            test_disk("/dev/sdb", "disk", Some("usb"), true),
+        ];
+        let mut visible = Vec::new();
+
+        flatten_visible_devices(&devices, &mut visible, false, false);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|device| device.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/dev/sdb"]
+        );
+
+        visible.clear();
+        flatten_visible_devices(&devices, &mut visible, true, false);
+        assert_eq!(visible.len(), 3);
+        assert!(visible[0].is_dangerous_internal());
+        assert_eq!(visible[0].risk_label(), "DANGER");
+    }
+
+    #[test]
+    fn hides_partitions_when_parent_drive_is_hidden() {
+        let mut internal = test_disk("/dev/sda", "disk", Some("sata"), false);
+        internal
+            .children
+            .push(test_disk("/dev/sda1", "part", None, false));
+        let mut removable = test_disk("/dev/sdb", "disk", Some("usb"), true);
+        removable
+            .children
+            .push(test_disk("/dev/sdb1", "part", None, true));
+        let devices = vec![internal, removable];
+        let mut visible = Vec::new();
+
+        flatten_visible_devices(&devices, &mut visible, false, false);
+
+        assert_eq!(
+            visible
+                .iter()
+                .map(|device| device.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/dev/sdb", "/dev/sdb1"]
+        );
+    }
+
+    fn test_disk(path: &str, kind: &str, transport: Option<&str>, removable: bool) -> BlockDevice {
+        BlockDevice {
+            name: path.trim_start_matches("/dev/").to_string(),
+            path: path.to_string(),
+            size_bytes: Some(1024),
+            transport: transport.map(str::to_string),
+            model: Some("Test".to_string()),
+            mountpoints: Vec::new(),
+            kind: kind.to_string(),
+            removable,
+            children: Vec::new(),
+        }
     }
 }

@@ -1,8 +1,11 @@
 use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
-    process::{Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    process::{Child, Command, Stdio},
+    sync::{
+        mpsc::{self, Receiver},
+        Arc, Mutex,
+    },
     thread,
     time::Instant,
 };
@@ -12,10 +15,11 @@ use eframe::egui::{
 };
 
 use crate::{
+    cancel::CancelFlag,
     config::default_chunk_size_mib,
     device::{find_device, flatten_visible_devices, list_devices, BlockDevice},
     error::Result,
-    image::{inspect_image, sha256_file},
+    image::{checksum_sidecar_status, inspect_image, sha256_file, ChecksumStatus},
     music::AudioEngine,
     safety::run_safety_checks,
     verify, writer,
@@ -40,6 +44,8 @@ pub struct EutherGui {
     progress: f32,
     running: bool,
     receiver: Option<Receiver<FlashEvent>>,
+    cancel_flag: Option<CancelFlag>,
+    helper_child: Arc<Mutex<Option<Child>>>,
     wave_phase: f32,
     phase_name: String,
     phase_done_bytes: u64,
@@ -47,6 +53,7 @@ pub struct EutherGui {
     phase_started_at: Option<Instant>,
     image_sha256: Option<String>,
     image_sha256_path: Option<String>,
+    checksum_status: Option<ChecksumStatus>,
     show_internal_drives: bool,
     music_enabled: bool,
     music: Option<AudioEngine>,
@@ -69,6 +76,8 @@ impl Default for EutherGui {
             progress: 0.0,
             running: false,
             receiver: None,
+            cancel_flag: None,
+            helper_child: Arc::new(Mutex::new(None)),
             wave_phase: 0.0,
             phase_name: "Idle".to_string(),
             phase_done_bytes: 0,
@@ -76,6 +85,7 @@ impl Default for EutherGui {
             phase_started_at: None,
             image_sha256: None,
             image_sha256_path: None,
+            checksum_status: None,
             show_internal_drives: false,
             music_enabled: true,
             music: None,
@@ -387,6 +397,9 @@ impl EutherGui {
                 ui.add_space(14.0);
                 ui.add(egui::ProgressBar::new(self.progress).desired_width(f32::INFINITY));
                 ui.label(RichText::new(&self.status).color(Color32::from_rgb(213, 219, 215)));
+                if self.running && ui.button("Cancel").clicked() {
+                    self.cancel_flash();
+                }
                 if self.phase_total_bytes > 0 {
                     ui.label(
                         RichText::new(self.phase_status_line())
@@ -536,6 +549,7 @@ impl EutherGui {
             self.image_path = path.display().to_string();
             self.image_sha256 = None;
             self.image_sha256_path = None;
+            self.checksum_status = None;
             self.last_error = None;
             self.status = "Image selected".to_string();
         }
@@ -555,6 +569,7 @@ impl EutherGui {
                 self.image_path = path.display().to_string();
                 self.image_sha256 = None;
                 self.image_sha256_path = None;
+                self.checksum_status = None;
                 self.last_error = None;
                 self.status = "Image dropped".to_string();
                 break;
@@ -655,6 +670,10 @@ impl EutherGui {
         }
 
         let hash = sha256_file(PathBuf::from(&path).as_path()).map_err(|err| err.to_string())?;
+        self.checksum_status = Some(
+            checksum_sidecar_status(PathBuf::from(&path).as_path(), &hash)
+                .map_err(|err| err.to_string())?,
+        );
         self.image_sha256 = Some(hash);
         self.image_sha256_path = Some(path);
         Ok(())
@@ -724,8 +743,12 @@ impl EutherGui {
         let verify_after_write = self.verify_after_write;
         let force = self.force;
         let (sender, receiver) = mpsc::channel();
+        let cancel = CancelFlag::default();
+        let thread_cancel = cancel.clone();
+        let helper_child = Arc::clone(&self.helper_child);
 
         self.receiver = Some(receiver);
+        self.cancel_flag = Some(cancel);
         self.running = true;
         self.progress = 0.0;
         self.status = "Writing image".to_string();
@@ -750,6 +773,7 @@ impl EutherGui {
                     chunk_size_mib,
                     verify_after_write,
                     force,
+                    &helper_child,
                 ) {
                     let _ = sender.send(FlashEvent::Finished(Err(err)));
                 }
@@ -769,7 +793,9 @@ impl EutherGui {
                         done_bytes: written,
                         total_bytes: image_size,
                     });
+                    thread_cancel.check()
                 },
+                &thread_cancel,
             );
 
             if let Err(err) = write_result {
@@ -791,7 +817,9 @@ impl EutherGui {
                             done_bytes: verified,
                             total_bytes: image_size,
                         });
+                        thread_cancel.check()
                     },
+                    &thread_cancel,
                 );
                 if let Err(err) = verify_result {
                     let _ = sender.send(FlashEvent::Finished(Err(err.to_string())));
@@ -803,13 +831,27 @@ impl EutherGui {
         });
     }
 
+    fn cancel_flash(&mut self) {
+        if let Some(cancel) = &self.cancel_flag {
+            cancel.cancel();
+        }
+        if let Ok(mut child) = self.helper_child.lock() {
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill();
+            }
+        }
+        self.status = "Cancelling".to_string();
+    }
+
     fn preflight_window(&mut self, ctx: &egui::Context) {
         let device = self.selected_block_device().ok();
         let image = inspect_image(PathBuf::from(self.image_path.trim()).as_path()).ok();
         let confirm_ready = device
             .as_ref()
             .is_some_and(|device| self.confirm_path.trim() == device.path);
-        let can_flash = !self.running && device.is_some() && image.is_some() && confirm_ready;
+        let checksum_ok = !matches!(self.checksum_status, Some(ChecksumStatus::Mismatch { .. }));
+        let can_flash =
+            !self.running && device.is_some() && image.is_some() && confirm_ready && checksum_ok;
 
         egui::Window::new("Pre-flight")
             .collapsible(false)
@@ -833,6 +875,7 @@ impl EutherGui {
                         "SHA256",
                         self.image_sha256.as_deref().unwrap_or("not calculated"),
                     );
+                    checksum_row(ui, self.checksum_status.as_ref());
                 } else {
                     ui.label(
                         RichText::new("Image is invalid or missing")
@@ -935,6 +978,7 @@ impl EutherGui {
                 }
                 FlashEvent::Finished(result) => {
                     self.running = false;
+                    self.cancel_flag = None;
                     self.phase_started_at = None;
                     self.progress = if result.is_ok() { 1.0 } else { self.progress };
                     match result {
@@ -1031,6 +1075,20 @@ fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
+fn checksum_row(ui: &mut egui::Ui, status: Option<&ChecksumStatus>) {
+    match status {
+        Some(ChecksumStatus::Match { expected }) => detail_row(ui, "SHA256 sidecar", expected),
+        Some(ChecksumStatus::Mismatch { expected }) => {
+            detail_row(ui, "SHA256 sidecar", expected);
+            ui.label(
+                RichText::new("SHA256 sidecar mismatch. Flashing is blocked by pre-flight.")
+                    .color(Color32::from_rgb(245, 119, 98)),
+            );
+        }
+        Some(ChecksumStatus::Missing) | None => detail_row(ui, "SHA256 sidecar", "not found"),
+    }
+}
+
 fn run_helper_with_pkexec(
     sender: &mpsc::Sender<FlashEvent>,
     image_path: &PathBuf,
@@ -1038,6 +1096,7 @@ fn run_helper_with_pkexec(
     chunk_size_mib: u64,
     verify_after_write: bool,
     force: bool,
+    helper_child: &Arc<Mutex<Option<Child>>>,
 ) -> std::result::Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
     let mut command = Command::new("pkexec");
@@ -1065,18 +1124,35 @@ fn run_helper_with_pkexec(
         .stdout
         .take()
         .ok_or_else(|| "failed to read writer helper stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "failed to read writer helper stderr".to_string())?;
+    if let Ok(mut slot) = helper_child.lock() {
+        *slot = Some(child);
+    }
     let reader = BufReader::new(stdout);
 
     for line in reader.lines() {
         parse_helper_line(sender, &line.map_err(|err| err.to_string())?);
     }
 
-    let output = child.wait_with_output().map_err(|err| err.to_string())?;
-    if output.status.success() {
+    let status = {
+        let mut child = helper_child
+            .lock()
+            .map_err(|_| "failed to lock writer helper handle".to_string())?
+            .take()
+            .ok_or_else(|| "writer helper process was not available".to_string())?;
+        child.wait().map_err(|err| err.to_string())?
+    };
+    if status.success() {
         let _ = sender.send(FlashEvent::Finished(Ok(())));
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let mut stderr_reader = BufReader::new(stderr);
+        let mut stderr = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr_reader, &mut stderr);
+        let stderr = stderr.trim().to_string();
         Err(if stderr.is_empty() {
             "writer helper failed or authorization was cancelled".to_string()
         } else {

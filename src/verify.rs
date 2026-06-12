@@ -6,7 +6,10 @@ use std::{
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::error::{EutherError, Result};
+use crate::{
+    cancel::CancelFlag,
+    error::{EutherError, Result},
+};
 
 pub fn verify_image(
     image_path: &Path,
@@ -17,9 +20,16 @@ pub fn verify_image(
 ) -> Result<()> {
     let progress = progress_bar(image_size, show_progress);
 
-    verify_image_with_progress(image_path, device_path, chunk_size_mib, |verified| {
-        progress.set_position(verified)
-    })?;
+    verify_image_with_progress(
+        image_path,
+        device_path,
+        chunk_size_mib,
+        |verified| {
+            progress.set_position(verified);
+            Ok(())
+        },
+        &CancelFlag::default(),
+    )?;
 
     progress.finish();
     Ok(())
@@ -30,9 +40,10 @@ pub fn verify_image_with_progress<F>(
     device_path: &Path,
     chunk_size_mib: u64,
     mut on_progress: F,
+    cancel: &CancelFlag,
 ) -> Result<()>
 where
-    F: FnMut(u64),
+    F: FnMut(u64) -> Result<()>,
 {
     let mut image = File::open(image_path)?;
     let mut device = File::open(device_path)?;
@@ -44,6 +55,7 @@ where
     let mut offset = 0_u64;
 
     loop {
+        cancel.check()?;
         let image_read = image.read(&mut image_buf)?;
         if image_read == 0 {
             break;
@@ -56,7 +68,7 @@ where
         }
 
         offset += image_read as u64;
-        on_progress(offset);
+        on_progress(offset)?;
     }
 
     Ok(())

@@ -73,6 +73,13 @@ scripts/install-desktop.sh
 This installs the release binary, app icon, and desktop launcher under
 `~/.local`.
 
+For the cleanest `pkexec` prompt, install the system polkit policy too:
+
+```bash
+sudo install -m 0755 target/release/eutheretcher /usr/local/bin/eutheretcher
+sudo install -m 0644 packaging/dev.euther.EutherEtcher.policy /usr/share/polkit-1/actions/dev.euther.EutherEtcher.policy
+```
+
 ## GUI
 
 The GUI is available as a native Linux window:

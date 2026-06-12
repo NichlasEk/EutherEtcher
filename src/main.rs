@@ -1,3 +1,4 @@
+mod cancel;
 mod config;
 mod device;
 mod error;
@@ -16,6 +17,7 @@ use std::{
 use clap::{Args, Parser, Subcommand};
 
 use crate::{
+    cancel::CancelFlag,
     config::{default_chunk_size_mib, Config},
     device::{find_device, flatten_visible_devices, list_devices},
     error::{EutherError, Result},
@@ -249,9 +251,16 @@ fn writer_helper_command(args: WriterHelperArgs) -> Result<()> {
     run_safety_checks(device, &image, &Default::default(), args.force)?;
 
     helper_phase("Writing", image.size_bytes)?;
-    writer::write_image_with_progress(&image.path, &args.device, args.chunk_size_mib, |written| {
-        let _ = helper_progress(written, image.size_bytes);
-    })?;
+    writer::write_image_with_progress(
+        &image.path,
+        &args.device,
+        args.chunk_size_mib,
+        |written| {
+            let _ = helper_progress(written, image.size_bytes);
+            Ok(())
+        },
+        &CancelFlag::default(),
+    )?;
 
     if args.verify {
         helper_phase("Verifying", image.size_bytes)?;
@@ -261,7 +270,9 @@ fn writer_helper_command(args: WriterHelperArgs) -> Result<()> {
             args.chunk_size_mib,
             |verified| {
                 let _ = helper_progress(verified, image.size_bytes);
+                Ok(())
             },
+            &CancelFlag::default(),
         )?;
     }
 

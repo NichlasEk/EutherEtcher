@@ -37,6 +37,9 @@ pub enum EutherError {
 
     #[error("audio error: {0}")]
     Audio(String),
+
+    #[error("operation cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, EutherError>;

@@ -1,5 +1,5 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -12,6 +12,13 @@ use crate::error::{EutherError, Result};
 pub struct ImageInfo {
     pub path: PathBuf,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChecksumStatus {
+    Missing,
+    Match { expected: String },
+    Mismatch { expected: String },
 }
 
 pub fn inspect_image(path: &Path) -> Result<ImageInfo> {
@@ -51,4 +58,46 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub fn checksum_sidecar_status(path: &Path, actual_sha256: &str) -> Result<ChecksumStatus> {
+    let sidecar = PathBuf::from(format!("{}.sha256", path.display()));
+    if !sidecar.exists() {
+        return Ok(ChecksumStatus::Missing);
+    }
+
+    let data = fs::read_to_string(sidecar)?;
+    let Some(expected) = parse_sha256_sidecar(&data) else {
+        return Ok(ChecksumStatus::Missing);
+    };
+
+    if expected.eq_ignore_ascii_case(actual_sha256) {
+        Ok(ChecksumStatus::Match { expected })
+    } else {
+        Ok(ChecksumStatus::Mismatch { expected })
+    }
+}
+
+fn parse_sha256_sidecar(data: &str) -> Option<String> {
+    data.split_whitespace()
+        .find(|part| part.len() == 64 && part.chars().all(|char| char.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_checksum_sidecar_hash() {
+        let hash = "a".repeat(64);
+        let data = format!("{hash}  image.iso\n");
+
+        assert_eq!(parse_sha256_sidecar(&data), Some(hash));
+    }
+
+    #[test]
+    fn ignores_invalid_checksum_sidecar() {
+        assert_eq!(parse_sha256_sidecar("not a checksum"), None);
+    }
 }

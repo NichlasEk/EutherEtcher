@@ -7,7 +7,7 @@ use std::{
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::error::Result;
+use crate::{cancel::CancelFlag, error::Result};
 
 pub fn write_image(
     image_path: &Path,
@@ -18,9 +18,16 @@ pub fn write_image(
 ) -> Result<()> {
     let progress = progress_bar(image_size, show_progress);
 
-    write_image_with_progress(image_path, device_path, chunk_size_mib, |written| {
-        progress.set_position(written)
-    })?;
+    write_image_with_progress(
+        image_path,
+        device_path,
+        chunk_size_mib,
+        |written| {
+            progress.set_position(written);
+            Ok(())
+        },
+        &CancelFlag::default(),
+    )?;
 
     progress.finish();
     Ok(())
@@ -31,9 +38,10 @@ pub fn write_image_with_progress<F>(
     device_path: &Path,
     chunk_size_mib: u64,
     mut on_progress: F,
+    cancel: &CancelFlag,
 ) -> Result<()>
 where
-    F: FnMut(u64),
+    F: FnMut(u64) -> Result<()>,
 {
     let mut image = File::open(image_path)?;
     let mut device = OpenOptions::new().write(true).open(device_path)?;
@@ -41,13 +49,14 @@ where
     let mut written = 0_u64;
 
     loop {
+        cancel.check()?;
         let read = image.read(&mut buffer)?;
         if read == 0 {
             break;
         }
         device.write_all(&buffer[..read])?;
         written += read as u64;
-        on_progress(written);
+        on_progress(written)?;
     }
 
     device.flush()?;

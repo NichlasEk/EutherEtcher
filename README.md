@@ -121,15 +121,19 @@ The helper reports structured phase, progress, and error messages back to the
 GUI for clearer failures.
 
 The GUI ships with a small real OGG music pack, picks one track at startup,
-loops it continuously, and exposes music on/off plus next-track controls. The
-old procedural synth loops remain only as a fallback when no playable external
-track is found.
+loops it continuously, and exposes music on/off plus next-track controls. On
+Linux, real music playback uses `mpv` with PipeWire output and JSON IPC for
+live volume control. The old procedural synth loops remain only as a fallback
+when no playable external track is found.
 
 ### Music Packs
 
 Bundled or external music is configured through a TOML manifest named
 `music.toml`. Missing files are ignored and the generated loops remain the
 fallback.
+
+For GUI music playback, install `mpv` with PipeWire output support. EutherEtcher
+starts it headless with `--ao=pipewire` and controls volume over mpv's JSON IPC.
 
 Example:
 

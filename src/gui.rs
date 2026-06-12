@@ -223,6 +223,9 @@ impl eframe::App for EutherGui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_flash_events();
         self.poll_checksum_events();
+        if let Some(music) = &mut self.music {
+            music.tick();
+        }
         self.handle_dropped_files(ctx);
         self.wave_phase = (self.wave_phase + 0.018) % std::f32::consts::TAU;
         ctx.request_repaint();

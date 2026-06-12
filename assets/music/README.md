@@ -1,7 +1,8 @@
 # EutherEtcher Music Packs
 
-EutherEtcher plays real music files from this directory before falling back to
-its built-in generated synthwave loops.
+EutherEtcher plays real music files from this directory through headless `mpv`
+with PipeWire output before falling back to its built-in generated synthwave
+loops. Live GUI volume control uses mpv's JSON IPC socket.
 
 Use `music.toml` in this directory:
 
@@ -15,8 +16,8 @@ source = "https://example.invalid/source"
 start_offset_seconds = 0.8
 ```
 
-Supported file types depend on `rodio`/Symphonia support in the local build;
-`.ogg`, `.flac`, and `.wav` are the safest choices.
+Supported file types depend on the local `mpv` build; `.ogg`, `.flac`, and
+`.wav` are the safest choices.
 
 Use `start_offset_seconds` when a track has a silent or slow intro that should
 not be heard every time EutherEtcher starts.

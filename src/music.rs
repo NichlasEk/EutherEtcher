@@ -4,12 +4,18 @@ use std::{
     fs::File,
     io::Write,
     num::NonZero,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rodio::{
-    cpal::{BufferSize, StreamError},
+    cpal::{
+        self,
+        traits::{DeviceTrait, HostTrait},
+        BufferSize, StreamError,
+    },
     Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source,
 };
 use serde::Deserialize;
@@ -32,8 +38,13 @@ const TRACKS: [CyberTrack; 10] = [
 ];
 
 pub struct AudioEngine {
-    device_sink: MixerDeviceSink,
-    player: Player,
+    device_sink: Option<MixerDeviceSink>,
+    player: Option<Player>,
+    pipewire_child: Option<Child>,
+    mpv_socket: Option<PathBuf>,
+    mpv_applied_volume: Option<f32>,
+    pipewire_started_at: Option<Instant>,
+    pipewire_track_duration: Option<Duration>,
     track_index: usize,
     file_tracks: Vec<MusicTrack>,
     current_name: String,
@@ -76,19 +87,26 @@ struct MusicTrack {
 
 impl AudioEngine {
     pub fn start_random(volume: f32) -> Result<Self> {
-        let mut device_sink = DeviceSinkBuilder::from_default_device()
-            .map(|builder| builder.with_error_callback(audio_stream_error))
-            .map(|builder| builder.with_buffer_size(BufferSize::Fixed(2048)))
-            .and_then(|builder| builder.open_sink_or_fallback())
-            .map_err(|err| EutherError::Audio(err.to_string()))?;
-        device_sink.log_on_drop(false);
-        log_music_event(format!("sink_opened: config={:?}", device_sink.config()));
-        let player = Player::connect_new(device_sink.mixer());
         let file_tracks = load_music_tracks();
         let track_count = file_tracks.len().max(TRACKS.len());
+        let (device_sink, player) = if file_tracks.is_empty() {
+            let mut device_sink = open_audio_sink()?;
+            device_sink.log_on_drop(false);
+            log_music_event(format!("sink_opened: config={:?}", device_sink.config()));
+            let player = Player::connect_new(device_sink.mixer());
+            (Some(device_sink), Some(player))
+        } else {
+            log_music_event("pipewire_primary: true");
+            (None, None)
+        };
         let mut engine = Self {
             device_sink,
             player,
+            pipewire_child: None,
+            mpv_socket: None,
+            mpv_applied_volume: None,
+            pipewire_started_at: None,
+            pipewire_track_duration: None,
             track_index: random_index(track_count),
             file_tracks,
             current_name: String::new(),
@@ -110,20 +128,65 @@ impl AudioEngine {
 
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
-        self.player.set_volume(self.volume);
+        if let Some(player) = &self.player {
+            player.set_volume(self.volume);
+        }
         log_music_event(format!("set_volume: {:.2}", self.volume));
+        if self.pipewire_child.is_some() {
+            self.apply_mpv_volume();
+        }
+    }
+
+    pub fn tick(&mut self) {
+        let Some(child) = &mut self.pipewire_child else {
+            return;
+        };
+
+        let finished = match child.try_wait() {
+            Ok(Some(status)) => {
+                log_music_event(format!("mpv_exited: {status}"));
+                if self
+                    .pipewire_started_at
+                    .is_some_and(|started_at| started_at.elapsed() < Duration::from_secs(1))
+                {
+                    self.pipewire_child = None;
+                    self.current_name = "Music playback failed".to_string();
+                    return;
+                }
+                true
+            }
+            Ok(None) => self
+                .pipewire_started_at
+                .zip(self.pipewire_track_duration)
+                .is_some_and(|(started_at, duration)| started_at.elapsed() >= duration),
+            Err(err) => {
+                log_music_event(format!("mpv_poll_failed: {err}"));
+                true
+            }
+        };
+
+        if finished {
+            self.pipewire_child = None;
+            self.restart_current_track();
+        } else {
+            self.apply_mpv_volume();
+        }
     }
 
     pub fn shutdown(&mut self) {
         log_music_event("shutdown");
-        self.player.set_volume(0.0);
-        self.player.stop();
+        self.stop_pipewire_child();
+        if let Some(player) = &self.player {
+            player.set_volume(0.0);
+            player.stop();
+        }
     }
 
     fn restart_current_track(&mut self) {
-        self.player.stop();
-        self.player = Player::connect_new(self.device_sink.mixer());
-        self.player.set_volume(self.volume);
+        self.stop_pipewire_child();
+        if let Some(player) = &self.player {
+            player.stop();
+        }
 
         if !self.file_tracks.is_empty() {
             let track = self.file_tracks[self.track_index % self.file_tracks.len()].clone();
@@ -147,23 +210,45 @@ impl AudioEngine {
                         self.volume,
                         track.start_offset_seconds.max(0.0)
                     ));
-                    self.player
-                        .append(source.skip_duration(offset).repeat_infinite());
+                    if self.try_start_mpv_track(&track) {
+                        return;
+                    }
+                    if self.ensure_rodio().is_err() {
+                        return;
+                    }
+                    let Some(player) = &self.player else {
+                        return;
+                    };
+                    player.set_volume(self.volume);
+                    player.append(ProbeSource::new(
+                        source.skip_duration(offset).repeat_infinite(),
+                        "file",
+                    ));
                 }
                 Err(err) => {
                     log_music_event(format!(
                         "file_decode_failed: path={} error={err}",
                         track.file.display()
                     ));
+                    if self.ensure_rodio().is_err() {
+                        self.current_name = "Audio unavailable".to_string();
+                        return;
+                    }
                     self.restart_procedural();
                 }
             }
         } else {
+            if self.ensure_rodio().is_err() {
+                self.current_name = "Audio unavailable".to_string();
+                return;
+            }
             self.restart_procedural();
         }
 
-        self.player.play();
-        self.player.set_volume(self.volume);
+        if let Some(player) = &self.player {
+            player.play();
+            player.set_volume(self.volume);
+        }
     }
 
     fn restart_procedural(&mut self) {
@@ -173,7 +258,107 @@ impl AudioEngine {
             "start_procedural: track={} volume={:.2}",
             track.name, self.volume
         ));
-        self.player.append(CyberSource::new(track));
+        if let Some(player) = &self.player {
+            player.append(ProbeSource::new(CyberSource::new(track), "procedural"));
+        }
+    }
+
+    fn ensure_rodio(&mut self) -> Result<()> {
+        if let (Some(device_sink), Some(_)) = (&self.device_sink, &self.player) {
+            let mixer = device_sink.mixer();
+            self.player = Some(Player::connect_new(mixer));
+            return Ok(());
+        }
+
+        let mut device_sink = open_audio_sink()?;
+        device_sink.log_on_drop(false);
+        log_music_event(format!("sink_opened: config={:?}", device_sink.config()));
+        let player = Player::connect_new(device_sink.mixer());
+        self.device_sink = Some(device_sink);
+        self.player = Some(player);
+        Ok(())
+    }
+
+    fn try_start_mpv_track(&mut self, track: &MusicTrack) -> bool {
+        let volume = format!("{:.0}", self.volume.clamp(0.0, 1.0) * 100.0);
+        let socket = mpv_socket_path();
+        let _ = fs::remove_file(&socket);
+        let child = Command::new("mpv")
+            .arg("--no-video")
+            .arg("--really-quiet")
+            .arg("--ao=pipewire")
+            .arg("--loop-file=inf")
+            .arg("--input-terminal=no")
+            .arg(format!("--input-ipc-server={}", socket.display()))
+            .arg(format!("--volume={volume}"))
+            .arg(&track.file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+
+        match child {
+            Ok(child) => {
+                let pid = child.id();
+                log_music_event(format!(
+                    "mpv_started: pid={} path={} volume={volume}",
+                    pid,
+                    track.file.display()
+                ));
+                self.pipewire_child = Some(child);
+                self.mpv_socket = Some(socket);
+                self.mpv_applied_volume = None;
+                self.pipewire_started_at = Some(Instant::now());
+                self.pipewire_track_duration = None;
+                self.apply_mpv_volume();
+                true
+            }
+            Err(err) => {
+                log_music_event(format!("mpv_start_failed: {err}"));
+                false
+            }
+        }
+    }
+
+    fn stop_pipewire_child(&mut self) {
+        if let Some(mut child) = self.pipewire_child.take() {
+            log_music_event(format!("mpv_stop: pid={}", child.id()));
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.pipewire_started_at = None;
+        self.pipewire_track_duration = None;
+        if let Some(socket) = self.mpv_socket.take() {
+            let _ = fs::remove_file(socket);
+        }
+        self.mpv_applied_volume = None;
+    }
+
+    fn apply_mpv_volume(&mut self) {
+        let Some(socket) = &self.mpv_socket else {
+            return;
+        };
+        let volume = self.volume.clamp(0.0, 1.0) * 100.0;
+        if self
+            .mpv_applied_volume
+            .is_some_and(|applied| (applied - volume).abs() < 0.5)
+        {
+            return;
+        }
+        match UnixStream::connect(socket) {
+            Ok(mut stream) => {
+                let command = serde_json::json!({
+                    "command": ["set_property", "volume", volume]
+                });
+                if writeln!(stream, "{command}").is_ok() {
+                    self.mpv_applied_volume = Some(volume);
+                    log_music_event(format!("mpv_volume_set: volume={volume:.0}"));
+                }
+            }
+            Err(err) => {
+                log_music_event(format!("mpv_volume_pending: {err}"));
+            }
+        }
     }
 }
 
@@ -199,6 +384,107 @@ fn log_music_event(message: impl AsRef<str>) {
 
 fn audio_stream_error(err: StreamError) {
     log_music_event(format!("stream_error: {err}"));
+}
+
+fn mpv_socket_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    PathBuf::from(format!(
+        "/tmp/eutheretcher-mpv-{}-{nanos}.sock",
+        std::process::id()
+    ))
+}
+
+fn open_audio_sink() -> Result<MixerDeviceSink> {
+    let host = cpal::default_host();
+    log_music_event(format!("audio_host: {}", host.id().name()));
+
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| EutherError::Audio("No default output audio device".to_string()))?;
+    match device.description() {
+        Ok(description) => log_music_event(format!("audio_device: {description}")),
+        Err(err) => log_music_event(format!("audio_device_description_error: {err}")),
+    }
+
+    DeviceSinkBuilder::from_device(device)
+        .map(|builder| builder.with_error_callback(audio_stream_error))
+        .map(|builder| builder.with_buffer_size(BufferSize::Fixed(2048)))
+        .and_then(|builder| builder.open_sink_or_fallback())
+        .map_err(|err| EutherError::Audio(err.to_string()))
+}
+
+#[derive(Debug, Clone)]
+struct ProbeSource<S> {
+    inner: S,
+    label: &'static str,
+    samples_seen: u64,
+    logged_first: bool,
+    logged_half_second: bool,
+}
+
+impl<S> ProbeSource<S> {
+    fn new(inner: S, label: &'static str) -> Self {
+        Self {
+            inner,
+            label,
+            samples_seen: 0,
+            logged_first: false,
+            logged_half_second: false,
+        }
+    }
+}
+
+impl<S> Iterator for ProbeSource<S>
+where
+    S: Source,
+{
+    type Item = S::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sample = self.inner.next();
+        if sample.is_some() {
+            self.samples_seen = self.samples_seen.saturating_add(1);
+            if !self.logged_first {
+                self.logged_first = true;
+                log_music_event(format!("source_pulled_first: {}", self.label));
+            }
+            let half_second_samples = u64::from(self.inner.sample_rate().get())
+                * u64::from(self.inner.channels().get())
+                / 2;
+            if !self.logged_half_second && self.samples_seen >= half_second_samples {
+                self.logged_half_second = true;
+                log_music_event(format!(
+                    "source_pulled_500ms: {} samples={}",
+                    self.label, self.samples_seen
+                ));
+            }
+        }
+        sample
+    }
+}
+
+impl<S> Source for ProbeSource<S>
+where
+    S: Source,
+{
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
+    }
+
+    fn channels(&self) -> NonZero<u16> {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> NonZero<u32> {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
 }
 
 impl CyberTrack {

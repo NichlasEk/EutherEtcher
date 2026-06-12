@@ -27,3 +27,12 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: eutheretcher-linux-x86_64
+          path: target/release/eutheretcher

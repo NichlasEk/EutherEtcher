@@ -1,0 +1,13 @@
+# Optional external music playlist for EutherEtcher.
+#
+# Put CC0/CC-BY compatible .ogg, .flac, or .wav files in this folder and list
+# them below. Missing files are ignored and the built-in procedural cyberpunk
+# loops remain the fallback.
+#
+# Example:
+#
+# [[track]]
+# title = "Night Bus Terminal"
+# file = "assets/music/night-bus-terminal.ogg"
+# license = "CC0"
+# source = "https://example.invalid/source"

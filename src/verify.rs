@@ -15,6 +15,25 @@ pub fn verify_image(
     chunk_size_mib: u64,
     show_progress: bool,
 ) -> Result<()> {
+    let progress = progress_bar(image_size, show_progress);
+
+    verify_image_with_progress(image_path, device_path, chunk_size_mib, |verified| {
+        progress.set_position(verified)
+    })?;
+
+    progress.finish();
+    Ok(())
+}
+
+pub fn verify_image_with_progress<F>(
+    image_path: &Path,
+    device_path: &Path,
+    chunk_size_mib: u64,
+    mut on_progress: F,
+) -> Result<()>
+where
+    F: FnMut(u64),
+{
     let mut image = File::open(image_path)?;
     let mut device = File::open(device_path)?;
     device.seek(SeekFrom::Start(0))?;
@@ -23,7 +42,6 @@ pub fn verify_image(
     let mut image_buf = vec![0_u8; chunk_size];
     let mut device_buf = vec![0_u8; chunk_size];
     let mut offset = 0_u64;
-    let progress = progress_bar(image_size, show_progress);
 
     loop {
         let image_read = image.read(&mut image_buf)?;
@@ -38,10 +56,9 @@ pub fn verify_image(
         }
 
         offset += image_read as u64;
-        progress.inc(image_read as u64);
+        on_progress(offset);
     }
 
-    progress.finish();
     Ok(())
 }
 

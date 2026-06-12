@@ -1,7 +1,10 @@
 use std::{
+    io::{BufRead, BufReader},
     path::PathBuf,
+    process::{Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
+    time::Instant,
 };
 
 use eframe::egui::{
@@ -12,15 +15,15 @@ use crate::{
     config::default_chunk_size_mib,
     device::{find_device, flatten_visible_devices, list_devices, BlockDevice},
     error::Result,
-    image::inspect_image,
+    image::{inspect_image, sha256_file},
     music::AudioEngine,
     safety::run_safety_checks,
     verify, writer,
 };
 
 enum FlashEvent {
-    Status(String),
-    Progress(u64),
+    Phase { name: String, total_bytes: u64 },
+    Progress { done_bytes: u64, total_bytes: u64 },
     Finished(std::result::Result<(), String>),
 }
 
@@ -38,6 +41,12 @@ pub struct EutherGui {
     running: bool,
     receiver: Option<Receiver<FlashEvent>>,
     wave_phase: f32,
+    phase_name: String,
+    phase_done_bytes: u64,
+    phase_total_bytes: u64,
+    phase_started_at: Option<Instant>,
+    image_sha256: Option<String>,
+    image_sha256_path: Option<String>,
     show_internal_drives: bool,
     music_enabled: bool,
     music: Option<AudioEngine>,
@@ -61,6 +70,12 @@ impl Default for EutherGui {
             running: false,
             receiver: None,
             wave_phase: 0.0,
+            phase_name: "Idle".to_string(),
+            phase_done_bytes: 0,
+            phase_total_bytes: 0,
+            phase_started_at: None,
+            image_sha256: None,
+            image_sha256_path: None,
             show_internal_drives: false,
             music_enabled: true,
             music: None,
@@ -92,6 +107,7 @@ pub fn run_gui() -> Result<()> {
 impl eframe::App for EutherGui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_flash_events();
+        self.handle_dropped_files(ctx);
         self.wave_phase = (self.wave_phase + 0.018) % std::f32::consts::TAU;
         ctx.request_repaint();
     }
@@ -105,11 +121,17 @@ impl eframe::App for EutherGui {
                     self.header(ui);
                     ui.add_space(16.0);
 
-                    ui.columns(2, |columns| {
-                        columns[0].set_width(390.0);
-                        self.device_panel(&mut columns[0]);
-                        self.flash_panel(&mut columns[1]);
-                    });
+                    if ui.available_width() < 900.0 {
+                        self.device_panel(ui);
+                        ui.add_space(12.0);
+                        self.flash_panel(ui);
+                    } else {
+                        ui.columns(2, |columns| {
+                            columns[0].set_width(390.0);
+                            self.device_panel(&mut columns[0]);
+                            self.flash_panel(&mut columns[1]);
+                        });
+                    }
 
                     if self.show_preflight {
                         self.preflight_window(ui.ctx());
@@ -328,6 +350,19 @@ impl EutherGui {
                         .hint_text(self.selected_device.as_deref().unwrap_or("/dev/sdX"))
                         .desired_width(f32::INFINITY),
                 );
+                if self.is_armed() {
+                    ui.label(
+                        RichText::new("ARMED")
+                            .font(FontId::monospace(14.0))
+                            .color(Color32::from_rgb(53, 224, 182)),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("Flash stays locked until the target path matches.")
+                            .font(FontId::proportional(12.0))
+                            .color(Color32::from_rgb(148, 156, 154)),
+                    );
+                }
 
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
@@ -352,6 +387,13 @@ impl EutherGui {
                 ui.add_space(14.0);
                 ui.add(egui::ProgressBar::new(self.progress).desired_width(f32::INFINITY));
                 ui.label(RichText::new(&self.status).color(Color32::from_rgb(213, 219, 215)));
+                if self.phase_total_bytes > 0 {
+                    ui.label(
+                        RichText::new(self.phase_status_line())
+                            .font(FontId::monospace(12.0))
+                            .color(Color32::from_rgb(148, 156, 154)),
+                    );
+                }
 
                 if let Some(music) = &self.music {
                     ui.label(
@@ -435,11 +477,7 @@ impl EutherGui {
         ui.horizontal(|ui| {
             self.step_badge(ui, "1", "Image", !self.image_path.trim().is_empty());
             self.step_badge(ui, "2", "Target", self.selected_device.is_some());
-            let armed = self
-                .selected_device
-                .as_deref()
-                .is_some_and(|path| self.confirm_path.trim() == path);
-            self.step_badge(ui, "3", "Flash", armed);
+            self.step_badge(ui, "3", "Flash", self.is_armed());
         });
     }
 
@@ -496,8 +534,31 @@ impl EutherGui {
             .pick_file()
         {
             self.image_path = path.display().to_string();
+            self.image_sha256 = None;
+            self.image_sha256_path = None;
             self.last_error = None;
             self.status = "Image selected".to_string();
+        }
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped_files = ctx.input(|input| input.raw.dropped_files.clone());
+        for file in dropped_files {
+            let Some(path) = file.path else {
+                continue;
+            };
+            let extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase);
+            if matches!(extension.as_deref(), Some("iso" | "img")) {
+                self.image_path = path.display().to_string();
+                self.image_sha256 = None;
+                self.image_sha256_path = None;
+                self.last_error = None;
+                self.status = "Image dropped".to_string();
+                break;
+            }
         }
     }
 
@@ -544,6 +605,12 @@ impl EutherGui {
             .ok_or_else(|| format!("Device no longer present: {path}"))
     }
 
+    fn is_armed(&self) -> bool {
+        self.selected_device
+            .as_deref()
+            .is_some_and(|path| self.confirm_path.trim() == path)
+    }
+
     fn dry_run(&mut self) {
         self.progress = 0.0;
         self.last_error = None;
@@ -566,6 +633,11 @@ impl EutherGui {
 
         match self.validate_selection() {
             Ok((_image_size, _device_path)) => {
+                if let Err(err) = self.refresh_image_hash() {
+                    self.status = "Pre-flight failed".to_string();
+                    self.last_error = Some(err);
+                    return;
+                }
                 self.show_preflight = true;
                 self.status = "Review pre-flight confirmation".to_string();
             }
@@ -574,6 +646,45 @@ impl EutherGui {
                 self.last_error = Some(err);
             }
         }
+    }
+
+    fn refresh_image_hash(&mut self) -> std::result::Result<(), String> {
+        let path = self.image_path.trim().to_string();
+        if self.image_sha256_path.as_deref() == Some(path.as_str()) && self.image_sha256.is_some() {
+            return Ok(());
+        }
+
+        let hash = sha256_file(PathBuf::from(&path).as_path()).map_err(|err| err.to_string())?;
+        self.image_sha256 = Some(hash);
+        self.image_sha256_path = Some(path);
+        Ok(())
+    }
+
+    fn phase_status_line(&self) -> String {
+        let elapsed = self
+            .phase_started_at
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let speed = if elapsed > 0.0 {
+            self.phase_done_bytes as f64 / elapsed
+        } else {
+            0.0
+        };
+        let remaining = self.phase_total_bytes.saturating_sub(self.phase_done_bytes);
+        let eta = if speed > 0.0 {
+            format_duration((remaining as f64 / speed).round() as u64)
+        } else {
+            "--:--".to_string()
+        };
+
+        format!(
+            "{}  {} / {}  {}/s  ETA {}",
+            self.phase_name,
+            format_bytes(self.phase_done_bytes),
+            format_bytes(self.phase_total_bytes),
+            format_bytes(speed as u64),
+            eta
+        )
     }
 
     fn start_flash(&mut self) {
@@ -611,20 +722,53 @@ impl EutherGui {
         let image_size = image.size_bytes;
         let chunk_size_mib = self.chunk_size_mib;
         let verify_after_write = self.verify_after_write;
+        let force = self.force;
         let (sender, receiver) = mpsc::channel();
 
         self.receiver = Some(receiver);
         self.running = true;
         self.progress = 0.0;
         self.status = "Writing image".to_string();
+        self.phase_name = "Writing".to_string();
+        self.phase_done_bytes = 0;
+        self.phase_total_bytes = image_size;
+        self.phase_started_at = Some(Instant::now());
 
         thread::spawn(move || {
+            if !is_root() {
+                if !command_exists("pkexec") {
+                    let _ = sender.send(FlashEvent::Finished(Err(
+                        "root privileges are required and pkexec was not found".to_string(),
+                    )));
+                    return;
+                }
+
+                if let Err(err) = run_helper_with_pkexec(
+                    &sender,
+                    &image_path,
+                    &device_path,
+                    chunk_size_mib,
+                    verify_after_write,
+                    force,
+                ) {
+                    let _ = sender.send(FlashEvent::Finished(Err(err)));
+                }
+                return;
+            }
+
+            let _ = sender.send(FlashEvent::Phase {
+                name: "Writing".to_string(),
+                total_bytes: image_size,
+            });
             let write_result = writer::write_image_with_progress(
                 &image_path,
                 &device_path,
                 chunk_size_mib,
                 |written| {
-                    let _ = sender.send(FlashEvent::Progress(written));
+                    let _ = sender.send(FlashEvent::Progress {
+                        done_bytes: written,
+                        total_bytes: image_size,
+                    });
                 },
             );
 
@@ -634,14 +778,22 @@ impl EutherGui {
             }
 
             if verify_after_write {
-                let _ = sender.send(FlashEvent::Status("Verifying image".to_string()));
-                if let Err(err) = verify::verify_image(
+                let _ = sender.send(FlashEvent::Phase {
+                    name: "Verifying".to_string(),
+                    total_bytes: image_size,
+                });
+                let verify_result = verify::verify_image_with_progress(
                     &image_path,
                     &device_path,
-                    image_size,
                     chunk_size_mib,
-                    false,
-                ) {
+                    |verified| {
+                        let _ = sender.send(FlashEvent::Progress {
+                            done_bytes: verified,
+                            total_bytes: image_size,
+                        });
+                    },
+                );
+                if let Err(err) = verify_result {
                     let _ = sender.send(FlashEvent::Finished(Err(err.to_string())));
                     return;
                 }
@@ -676,6 +828,11 @@ impl EutherGui {
                 if let Some(image) = &image {
                     detail_row(ui, "Image", &image.path.display().to_string());
                     detail_row(ui, "Image size", &format!("{} bytes", image.size_bytes));
+                    detail_row(
+                        ui,
+                        "SHA256",
+                        self.image_sha256.as_deref().unwrap_or("not calculated"),
+                    );
                 } else {
                     ui.label(
                         RichText::new("Image is invalid or missing")
@@ -694,6 +851,12 @@ impl EutherGui {
                     );
                     detail_row(ui, "Risk", device.risk_label());
                     detail_row(ui, "Mountpoints", &format_mountpoints_recursive(device));
+                    if device.has_mountpoints_recursive() {
+                        ui.label(
+                            RichText::new("Mounted target is blocked.")
+                                .color(Color32::from_rgb(245, 119, 98)),
+                        );
+                    }
                 } else {
                     ui.label(
                         RichText::new("Target is missing").color(Color32::from_rgb(245, 119, 98)),
@@ -754,16 +917,25 @@ impl EutherGui {
         let mut keep_receiver = true;
         while let Ok(event) = receiver.try_recv() {
             match event {
-                FlashEvent::Status(status) => {
-                    self.status = status;
+                FlashEvent::Phase { name, total_bytes } => {
+                    self.phase_name = name.clone();
+                    self.phase_done_bytes = 0;
+                    self.phase_total_bytes = total_bytes;
+                    self.phase_started_at = Some(Instant::now());
+                    self.progress = 0.0;
+                    self.status = format!("{name} image");
                 }
-                FlashEvent::Progress(written) => {
-                    if let Ok((image_size, _)) = self.validate_selection() {
-                        self.progress = (written as f32 / image_size as f32).clamp(0.0, 1.0);
-                    }
+                FlashEvent::Progress {
+                    done_bytes,
+                    total_bytes,
+                } => {
+                    self.phase_done_bytes = done_bytes;
+                    self.phase_total_bytes = total_bytes;
+                    self.progress = (done_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0);
                 }
                 FlashEvent::Finished(result) => {
                     self.running = false;
+                    self.phase_started_at = None;
                     self.progress = if result.is_ok() { 1.0 } else { self.progress };
                     match result {
                         Ok(()) => {
@@ -798,6 +970,26 @@ fn format_size(bytes: Option<u64>) -> String {
         let mib = bytes as f64 / 1024.0 / 1024.0;
         format!("{mib:.1} MiB")
     }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    let gib = bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+    if gib >= 1.0 {
+        format!("{gib:.1} GiB")
+    } else {
+        let mib = bytes as f64 / 1024.0 / 1024.0;
+        if mib >= 1.0 {
+            format!("{mib:.1} MiB")
+        } else {
+            format!("{bytes} B")
+        }
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
 }
 
 fn format_mountpoints(mountpoints: &[String]) -> String {
@@ -837,4 +1029,112 @@ fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
             );
         });
     });
+}
+
+fn run_helper_with_pkexec(
+    sender: &mpsc::Sender<FlashEvent>,
+    image_path: &PathBuf,
+    device_path: &PathBuf,
+    chunk_size_mib: u64,
+    verify_after_write: bool,
+    force: bool,
+) -> std::result::Result<(), String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    let mut command = Command::new("pkexec");
+    command
+        .arg(exe)
+        .arg("writer-helper")
+        .arg("--image")
+        .arg(image_path)
+        .arg("--device")
+        .arg(device_path)
+        .arg("--chunk-size-mib")
+        .arg(chunk_size_mib.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if verify_after_write {
+        command.arg("--verify");
+    }
+    if force {
+        command.arg("--force");
+    }
+
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to read writer helper stdout".to_string())?;
+    let reader = BufReader::new(stdout);
+
+    for line in reader.lines() {
+        parse_helper_line(sender, &line.map_err(|err| err.to_string())?);
+    }
+
+    let output = child.wait_with_output().map_err(|err| err.to_string())?;
+    if output.status.success() {
+        let _ = sender.send(FlashEvent::Finished(Ok(())));
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "writer helper failed or authorization was cancelled".to_string()
+        } else {
+            stderr
+        })
+    }
+}
+
+fn parse_helper_line(sender: &mpsc::Sender<FlashEvent>, line: &str) {
+    let mut parts = line.split('\t');
+    match parts.next() {
+        Some("PHASE") => {
+            let Some(name) = parts.next() else {
+                return;
+            };
+            let total_bytes = parts
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let _ = sender.send(FlashEvent::Phase {
+                name: name.to_string(),
+                total_bytes,
+            });
+        }
+        Some("PROGRESS") => {
+            let done_bytes = parts
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let total_bytes = parts
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let _ = sender.send(FlashEvent::Progress {
+                done_bytes,
+                total_bytes,
+            });
+        }
+        Some("DONE") => {}
+        _ => {}
+    }
+}
+
+fn is_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|uid| uid.trim() == "0")
+}
+
+fn command_exists(command: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {command}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }

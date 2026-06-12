@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=EutherEtcher
+Comment=Safely flash ISO and IMG files to USB and SD devices
+Exec=eutheretcher gui
+Icon=eutheretcher
+Terminal=false
+Categories=Utility;System;
+Keywords=USB;SD;ISO;IMG;Flash;Etcher;

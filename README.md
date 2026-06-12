@@ -64,6 +64,15 @@ verbose = true
 cargo build
 ```
 
+## Install Desktop App
+
+```bash
+scripts/install-desktop.sh
+```
+
+This installs the release binary, app icon, and desktop launcher under
+`~/.local`.
+
 ## GUI
 
 The GUI is available as a native Linux window:
@@ -78,15 +87,24 @@ typing the exact target device path.
 The GUI flow is intentionally simple:
 
 - Select an `.iso` or `.img` with the native file picker.
+- Or drag-and-drop an `.iso` or `.img` into the window.
 - Select a whole-disk USB/SD target card.
 - Review the pre-flight confirmation.
 - Type the exact target path before the final flash button unlocks.
 
 Partitions are shown as target details, not as clickable flash targets.
+The pre-flight view shows SHA256, mountpoints, risk, model, transport, and size.
+Mounted targets remain blocked.
+
+The GUI normally runs without root privileges. When flashing is started, it uses
+`pkexec` to run EutherEtcher's hidden writer helper with elevated privileges.
 
 The GUI starts a built-in procedural cyberpunk loop by default. It includes ten
 free generated loops, picks one at startup, loops it continuously, and exposes
 music on/off plus next-loop controls.
+
+External CC0/CC-BY music can be added through `assets/music/music.toml`. Missing
+files are ignored and the generated loops remain the fallback.
 
 ## Notes
 

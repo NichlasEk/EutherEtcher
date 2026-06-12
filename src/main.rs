@@ -8,7 +8,10 @@ mod safety;
 mod verify;
 mod writer;
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -34,6 +37,8 @@ enum Command {
     Flash(FlashArgs),
     Verify(VerifyArgs),
     Gui,
+    #[command(hide = true)]
+    WriterHelper(WriterHelperArgs),
 }
 
 #[derive(Debug, Args)]
@@ -70,6 +75,20 @@ struct VerifyArgs {
     config: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+struct WriterHelperArgs {
+    #[arg(long)]
+    image: PathBuf,
+    #[arg(long)]
+    device: PathBuf,
+    #[arg(long, default_value_t = default_chunk_size_mib())]
+    chunk_size_mib: u64,
+    #[arg(long)]
+    verify: bool,
+    #[arg(long)]
+    force: bool,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err}");
@@ -85,6 +104,7 @@ fn run() -> Result<()> {
         Command::Flash(args) => flash_command(args),
         Command::Verify(args) => verify_command(args),
         Command::Gui => gui::run_gui(),
+        Command::WriterHelper(args) => writer_helper_command(args),
     }
 }
 
@@ -217,6 +237,48 @@ fn verify_command(args: VerifyArgs) -> Result<()> {
     )?;
 
     println!("verified");
+    Ok(())
+}
+
+fn writer_helper_command(args: WriterHelperArgs) -> Result<()> {
+    let image = inspect_image(&args.image)?;
+    let devices = list_devices()?;
+    let device = find_device(&devices, path_to_str(&args.device)?)
+        .ok_or_else(|| EutherError::DeviceNotFound(args.device.display().to_string()))?;
+
+    run_safety_checks(device, &image, &Default::default(), args.force)?;
+
+    helper_phase("Writing", image.size_bytes)?;
+    writer::write_image_with_progress(&image.path, &args.device, args.chunk_size_mib, |written| {
+        let _ = helper_progress(written, image.size_bytes);
+    })?;
+
+    if args.verify {
+        helper_phase("Verifying", image.size_bytes)?;
+        verify::verify_image_with_progress(
+            &image.path,
+            &args.device,
+            args.chunk_size_mib,
+            |verified| {
+                let _ = helper_progress(verified, image.size_bytes);
+            },
+        )?;
+    }
+
+    println!("DONE");
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn helper_phase(name: &str, total: u64) -> Result<()> {
+    println!("PHASE\t{name}\t{total}");
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn helper_progress(done: u64, total: u64) -> Result<()> {
+    println!("PROGRESS\t{done}\t{total}");
+    io::stdout().flush()?;
     Ok(())
 }
 

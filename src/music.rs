@@ -1,10 +1,14 @@
 use std::{
     f32::consts::TAU,
+    fs,
+    fs::File,
     num::NonZero,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use serde::Deserialize;
 
 use crate::error::{EutherError, Result};
 
@@ -27,6 +31,8 @@ pub struct AudioEngine {
     device_sink: MixerDeviceSink,
     player: Player,
     track_index: usize,
+    file_tracks: Vec<MusicTrack>,
+    current_name: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,37 +50,80 @@ struct CyberSource {
     channel: u16,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct MusicManifest {
+    #[serde(default)]
+    track: Vec<MusicTrack>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MusicTrack {
+    title: String,
+    file: PathBuf,
+    license: String,
+    source: String,
+}
+
 impl AudioEngine {
     pub fn start_random() -> Result<Self> {
         let mut device_sink = DeviceSinkBuilder::open_default_sink()
             .map_err(|err| EutherError::Audio(err.to_string()))?;
         device_sink.log_on_drop(false);
         let player = Player::connect_new(device_sink.mixer());
+        let file_tracks = load_music_tracks();
+        let track_count = file_tracks.len().max(TRACKS.len());
         let mut engine = Self {
             device_sink,
             player,
-            track_index: random_track_index(),
+            track_index: random_index(track_count),
+            file_tracks,
+            current_name: String::new(),
         };
         engine.restart_current_track();
         Ok(engine)
     }
 
     pub fn next_track(&mut self) {
-        self.track_index = (self.track_index + 1 + random_track_index()) % TRACKS.len();
+        let track_count = self.file_tracks.len().max(TRACKS.len());
+        self.track_index = (self.track_index + 1 + random_index(track_count)) % track_count;
         self.restart_current_track();
     }
 
-    pub fn track_name(&self) -> &'static str {
-        TRACKS[self.track_index].name
+    pub fn track_name(&self) -> &str {
+        &self.current_name
     }
 
     fn restart_current_track(&mut self) {
         self.player.stop();
         self.player = Player::connect_new(self.device_sink.mixer());
-        self.player
-            .append(CyberSource::new(TRACKS[self.track_index]));
+
+        if !self.file_tracks.is_empty() {
+            let track = self.file_tracks[self.track_index % self.file_tracks.len()].clone();
+            match File::open(&track.file)
+                .map_err(|err| err.to_string())
+                .and_then(|file| Decoder::try_from(file).map_err(|err| err.to_string()))
+            {
+                Ok(source) => {
+                    self.current_name =
+                        format!("{} ({}, {})", track.title, track.license, track.source);
+                    self.player.append(source.repeat_infinite());
+                }
+                Err(_) => {
+                    self.restart_procedural();
+                }
+            }
+        } else {
+            self.restart_procedural();
+        }
+
         self.player.play();
         self.player.set_volume(0.35);
+    }
+
+    fn restart_procedural(&mut self) {
+        let track = TRACKS[self.track_index % TRACKS.len()];
+        self.current_name = format!("{} (generated)", track.name);
+        self.player.append(CyberSource::new(track));
     }
 }
 
@@ -204,9 +253,29 @@ fn soft_clip(value: f32) -> f32 {
     value / (1.0 + value.abs())
 }
 
-fn random_track_index() -> usize {
+fn load_music_tracks() -> Vec<MusicTrack> {
+    let manifest_path = Path::new("assets/music/music.toml");
+    let Ok(data) = fs::read_to_string(manifest_path) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = toml::from_str::<MusicManifest>(&data) else {
+        return Vec::new();
+    };
+
+    manifest
+        .track
+        .into_iter()
+        .filter(|track| track.file.exists())
+        .collect()
+}
+
+fn random_index(max: usize) -> usize {
+    if max == 0 {
+        return 0;
+    }
+
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as usize % TRACKS.len())
+        .map(|duration| duration.as_nanos() as usize % max)
         .unwrap_or(0)
 }

@@ -75,6 +75,15 @@ cargo run -- gui
 It uses the same safety checks as the CLI. Flashing from the GUI still requires
 typing the exact target device path.
 
+The GUI flow is intentionally simple:
+
+- Select an `.iso` or `.img` with the native file picker.
+- Select a whole-disk USB/SD target card.
+- Review the pre-flight confirmation.
+- Type the exact target path before the final flash button unlocks.
+
+Partitions are shown as target details, not as clickable flash targets.
+
 The GUI starts a built-in procedural cyberpunk loop by default. It includes ten
 free generated loops, picks one at startup, loops it continuously, and exposes
 music on/off plus next-loop controls.

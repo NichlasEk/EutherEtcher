@@ -42,6 +42,7 @@ pub struct EutherGui {
     music_enabled: bool,
     music: Option<AudioEngine>,
     music_error: Option<String>,
+    show_preflight: bool,
 }
 
 impl Default for EutherGui {
@@ -64,6 +65,7 @@ impl Default for EutherGui {
             music_enabled: true,
             music: None,
             music_error: None,
+            show_preflight: false,
         };
         app.refresh_devices();
         app.start_music();
@@ -108,6 +110,10 @@ impl eframe::App for EutherGui {
                         self.device_panel(&mut columns[0]);
                         self.flash_panel(&mut columns[1]);
                     });
+
+                    if self.show_preflight {
+                        self.preflight_window(ui.ctx());
+                    }
                 });
             });
     }
@@ -180,8 +186,19 @@ impl EutherGui {
                     );
                     refs.into_iter().cloned().collect::<Vec<_>>()
                 };
+                let targets = flat
+                    .into_iter()
+                    .filter(|device| device.kind == "disk")
+                    .collect::<Vec<_>>();
 
-                for device in &flat {
+                if targets.is_empty() {
+                    ui.label(
+                        RichText::new("No removable USB/SD targets detected.")
+                            .color(Color32::from_rgb(148, 156, 154)),
+                    );
+                }
+
+                for device in &targets {
                     self.device_row(ui, device);
                     ui.add_space(6.0);
                 }
@@ -242,6 +259,22 @@ impl EutherGui {
                             .font(FontId::proportional(13.0))
                             .color(Color32::from_rgb(148, 156, 154)),
                         );
+
+                        if !device.children.is_empty() {
+                            ui.add_space(4.0);
+                            for child in &device.children {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}  {}  {}",
+                                        child.path,
+                                        format_size(child.size_bytes),
+                                        format_mountpoints(&child.mountpoints)
+                                    ))
+                                    .font(FontId::monospace(12.0))
+                                    .color(Color32::from_rgb(118, 128, 127)),
+                                );
+                            }
+                        }
                     });
                 });
             })
@@ -265,11 +298,17 @@ impl EutherGui {
                 ui.add_space(12.0);
 
                 ui.label(RichText::new("1. Image").strong());
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.image_path)
-                        .hint_text("./archlinux.iso")
-                        .desired_width(f32::INFINITY),
-                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.image_path)
+                            .hint_text("./archlinux.iso")
+                            .desired_width(f32::INFINITY),
+                    );
+
+                    if ui.button("Select image").clicked() {
+                        self.pick_image();
+                    }
+                });
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -306,7 +345,7 @@ impl EutherGui {
                         .add_enabled(flash_enabled, egui::Button::new("Flash image"))
                         .clicked()
                     {
-                        self.start_flash();
+                        self.open_preflight();
                     }
                 });
 
@@ -451,6 +490,17 @@ impl EutherGui {
         }
     }
 
+    fn pick_image(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Disk images", &["iso", "img"])
+            .pick_file()
+        {
+            self.image_path = path.display().to_string();
+            self.last_error = None;
+            self.status = "Image selected".to_string();
+        }
+    }
+
     fn start_music(&mut self) {
         match AudioEngine::start_random() {
             Ok(engine) => {
@@ -511,8 +561,24 @@ impl EutherGui {
         }
     }
 
+    fn open_preflight(&mut self) {
+        self.last_error = None;
+
+        match self.validate_selection() {
+            Ok((_image_size, _device_path)) => {
+                self.show_preflight = true;
+                self.status = "Review pre-flight confirmation".to_string();
+            }
+            Err(err) => {
+                self.status = "Pre-flight failed".to_string();
+                self.last_error = Some(err);
+            }
+        }
+    }
+
     fn start_flash(&mut self) {
         self.last_error = None;
+        self.show_preflight = false;
 
         let device = match self.selected_block_device() {
             Ok(device) => device,
@@ -585,6 +651,91 @@ impl EutherGui {
         });
     }
 
+    fn preflight_window(&mut self, ctx: &egui::Context) {
+        let device = self.selected_block_device().ok();
+        let image = inspect_image(PathBuf::from(self.image_path.trim()).as_path()).ok();
+        let confirm_ready = device
+            .as_ref()
+            .is_some_and(|device| self.confirm_path.trim() == device.path);
+        let can_flash = !self.running && device.is_some() && image.is_some() && confirm_ready;
+
+        egui::Window::new("Pre-flight")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(520.0);
+                ui.label(
+                    RichText::new("Final check before writing")
+                        .font(FontId::proportional(24.0))
+                        .strong()
+                        .color(Color32::from_rgb(236, 241, 235)),
+                );
+                ui.add_space(10.0);
+
+                if let Some(image) = &image {
+                    detail_row(ui, "Image", &image.path.display().to_string());
+                    detail_row(ui, "Image size", &format!("{} bytes", image.size_bytes));
+                } else {
+                    ui.label(
+                        RichText::new("Image is invalid or missing")
+                            .color(Color32::from_rgb(245, 119, 98)),
+                    );
+                }
+
+                if let Some(device) = &device {
+                    detail_row(ui, "Target", &device.path);
+                    detail_row(ui, "Model", device.model.as_deref().unwrap_or("unknown"));
+                    detail_row(ui, "Target size", &format_size(device.size_bytes));
+                    detail_row(
+                        ui,
+                        "Transport",
+                        device.transport.as_deref().unwrap_or("unknown"),
+                    );
+                    detail_row(ui, "Risk", device.risk_label());
+                    detail_row(ui, "Mountpoints", &format_mountpoints_recursive(device));
+                } else {
+                    ui.label(
+                        RichText::new("Target is missing").color(Color32::from_rgb(245, 119, 98)),
+                    );
+                }
+
+                ui.add_space(12.0);
+                ui.label("Type the exact target path to enable flashing");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.confirm_path)
+                        .hint_text(
+                            device
+                                .as_ref()
+                                .map(|device| device.path.as_str())
+                                .unwrap_or("/dev/sdX"),
+                        )
+                        .desired_width(f32::INFINITY),
+                );
+
+                if !confirm_ready {
+                    ui.label(
+                        RichText::new("Flash is locked until the target path matches exactly.")
+                            .color(Color32::from_rgb(245, 177, 66)),
+                    );
+                }
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.show_preflight = false;
+                    }
+
+                    if ui
+                        .add_enabled(can_flash, egui::Button::new("Flash now"))
+                        .clicked()
+                    {
+                        self.start_flash();
+                    }
+                });
+            });
+    }
+
     fn validate_selection(&self) -> std::result::Result<(u64, String), String> {
         let device = self.selected_block_device()?;
         let image = inspect_image(PathBuf::from(self.image_path.trim()).as_path())
@@ -647,4 +798,43 @@ fn format_size(bytes: Option<u64>) -> String {
         let mib = bytes as f64 / 1024.0 / 1024.0;
         format!("{mib:.1} MiB")
     }
+}
+
+fn format_mountpoints(mountpoints: &[String]) -> String {
+    if mountpoints.is_empty() {
+        "-".to_string()
+    } else {
+        mountpoints.join(", ")
+    }
+}
+
+fn format_mountpoints_recursive(device: &BlockDevice) -> String {
+    let mut mountpoints = device.mountpoints.clone();
+    collect_child_mountpoints(device, &mut mountpoints);
+    format_mountpoints(&mountpoints)
+}
+
+fn collect_child_mountpoints(device: &BlockDevice, mountpoints: &mut Vec<String>) {
+    for child in &device.children {
+        mountpoints.extend(child.mountpoints.iter().cloned());
+        collect_child_mountpoints(child, mountpoints);
+    }
+}
+
+fn detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.set_min_width(500.0);
+        ui.label(
+            RichText::new(label)
+                .font(FontId::proportional(13.0))
+                .color(Color32::from_rgb(148, 156, 154)),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(value)
+                    .font(FontId::monospace(13.0))
+                    .color(Color32::from_rgb(232, 238, 233)),
+            );
+        });
+    });
 }

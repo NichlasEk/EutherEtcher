@@ -15,16 +15,16 @@ use crate::error::{EutherError, Result};
 const SAMPLE_RATE: u32 = 44_100;
 const CHANNELS: u16 = 2;
 const TRACKS: [CyberTrack; 10] = [
-    CyberTrack::new("Midnight Uplink", 92.0, 41.2, [0, 3, 7, 10]),
-    CyberTrack::new("Chrome Alley", 104.0, 43.65, [0, 2, 7, 9]),
-    CyberTrack::new("Neon Rain", 88.0, 36.71, [0, 5, 7, 10]),
-    CyberTrack::new("Null District", 118.0, 49.0, [0, 3, 8, 10]),
-    CyberTrack::new("Battery Shrine", 96.0, 38.89, [0, 4, 7, 11]),
-    CyberTrack::new("Ghost Terminal", 110.0, 46.25, [0, 3, 5, 10]),
-    CyberTrack::new("Vapor Circuit", 82.0, 34.65, [0, 2, 5, 9]),
-    CyberTrack::new("Ion Market", 126.0, 51.91, [0, 3, 7, 12]),
-    CyberTrack::new("Blackout Metro", 100.0, 30.87, [0, 5, 8, 10]),
-    CyberTrack::new("Synthetic Dawn", 112.0, 55.0, [0, 4, 7, 10]),
+    CyberTrack::new("Midnight Uplink", 92.0, 41.2, [0, 3, 7, 10], 11),
+    CyberTrack::new("Chrome Alley", 104.0, 43.65, [0, 2, 7, 9], 23),
+    CyberTrack::new("Neon Rain", 88.0, 36.71, [0, 5, 7, 10], 37),
+    CyberTrack::new("Null District", 118.0, 49.0, [0, 3, 8, 10], 41),
+    CyberTrack::new("Battery Shrine", 96.0, 38.89, [0, 4, 7, 11], 53),
+    CyberTrack::new("Ghost Terminal", 110.0, 46.25, [0, 3, 5, 10], 67),
+    CyberTrack::new("Vapor Circuit", 82.0, 34.65, [0, 2, 5, 9], 79),
+    CyberTrack::new("Ion Market", 126.0, 51.91, [0, 3, 7, 12], 83),
+    CyberTrack::new("Blackout Metro", 100.0, 30.87, [0, 5, 8, 10], 97),
+    CyberTrack::new("Synthetic Dawn", 112.0, 55.0, [0, 4, 7, 10], 109),
 ];
 
 pub struct AudioEngine {
@@ -41,6 +41,7 @@ pub struct CyberTrack {
     bpm: f32,
     root: f32,
     scale: [i32; 4],
+    seed: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -128,12 +129,13 @@ impl AudioEngine {
 }
 
 impl CyberTrack {
-    const fn new(name: &'static str, bpm: f32, root: f32, scale: [i32; 4]) -> Self {
+    const fn new(name: &'static str, bpm: f32, root: f32, scale: [i32; 4], seed: u32) -> Self {
         Self {
             name,
             bpm,
             root,
             scale,
+            seed,
         }
     }
 }
@@ -150,26 +152,76 @@ impl CyberSource {
     fn sample(&self) -> f32 {
         let seconds = self.frame as f32 / SAMPLE_RATE as f32;
         let beat = seconds * self.track.bpm / 60.0;
-        let step = ((beat * 4.0).floor() as usize) % 16;
+        let global_step = (beat * 4.0).floor() as usize;
+        let step = global_step % 16;
+        let long_step = global_step % 64;
+        let bar = (global_step / 16) % 8;
         let step_phase = (beat * 4.0).fract();
         let bar_phase = (beat / 4.0).fract();
+        let phrase_phase = ((beat / 32.0).fract() * TAU).sin();
         let root = self.track.root;
 
-        let bass_step = [0, 0, 7, 0, 10, 0, 7, 3, 0, 0, 5, 0, 7, 0, 10, 7][step];
-        let arp_step = self.track.scale[(step * 3 + 1) % self.track.scale.len()] + 12;
+        let progression = [
+            self.track.scale[0],
+            self.track.scale[1],
+            self.track.scale[2],
+            self.track.scale[(bar + 1) % self.track.scale.len()],
+            self.track.scale[0] - 12,
+            self.track.scale[3],
+            self.track.scale[1],
+            self.track.scale[2] + 12,
+        ];
+        let chord_root = progression[bar];
+        let bass_pattern = [0, 0, 7, 0, 10, 0, 7, 3, 0, 0, 5, 0, 7, 0, 10, 7];
+        let bass_step = bass_pattern[(step + bar * 3 + self.track.seed as usize) % 16] + chord_root;
+        let arp_index = (long_step * 3 + bar + self.track.seed as usize) % self.track.scale.len();
+        let arp_step = self.track.scale[arp_index] + 12 + if bar >= 4 { 12 } else { 0 };
+        let lead_step = self.track.scale[(long_step + bar * 2) % self.track.scale.len()]
+            + 24
+            + if long_step.is_multiple_of(11) { 7 } else { 0 };
+
         let bass = square(seconds, semitone(root, bass_step), 0.42) * gate(step_phase, 0.62);
-        let arp = saw(seconds, semitone(root, arp_step), 0.22) * gate(step_phase, 0.34);
+        let sub = sine(seconds, semitone(root, chord_root - 12), 0.2)
+            * (0.35 + 0.25 * phrase_phase.abs());
+        let arp = saw(seconds, semitone(root, arp_step), 0.18 + bar as f32 * 0.006)
+            * gate(step_phase, 0.34);
+        let lead_gate = if bar >= 2 && long_step % 4 != 1 {
+            0.22
+        } else {
+            0.0
+        };
+        let lead = pulse(seconds, semitone(root, lead_step), 0.31, 0.2)
+            * gate(step_phase, 0.48)
+            * lead_gate;
+        let echo = pulse(
+            seconds - 0.19,
+            semitone(root, lead_step - 12 + (bar % 2) as i32 * 7),
+            0.46,
+            0.08,
+        ) * gate((step_phase + 0.38).fract(), 0.42);
         let pad = saw(
             seconds,
-            semitone(root, self.track.scale[step % 4] + 24),
-            0.08,
-        ) * (0.55 + 0.45 * (bar_phase * TAU).sin());
-        let kick = thump(step_phase, step.is_multiple_of(4)) * 0.55;
-        let hat = noise(self.frame) * gate(step_phase, 0.12) * 0.08;
-        let snare =
-            noise(self.frame.wrapping_mul(31)) * thump(step_phase, step == 4 || step == 12) * 0.16;
+            semitone(root, self.track.scale[(step + bar) % 4] + 24),
+            0.055,
+        ) * (0.5 + 0.35 * (bar_phase * TAU).sin());
+        let kick = thump(
+            step_phase,
+            step.is_multiple_of(4) || (bar >= 4 && step == 14),
+        ) * 0.6;
+        let hat_open = long_step % 8 == 6;
+        let hat = noise(self.frame ^ self.track.seed as u64)
+            * gate(step_phase, if hat_open { 0.42 } else { 0.1 })
+            * if hat_open { 0.07 } else { 0.045 };
+        let snare = noise(self.frame.wrapping_mul(31 + self.track.seed as u64))
+            * thump(step_phase, step == 4 || step == 12)
+            * 0.15;
+        let glitch = if long_step == 63 {
+            noise(self.frame.wrapping_mul(911)) * gate(step_phase, 0.22) * 0.08
+        } else {
+            0.0
+        };
 
-        soft_clip(bass + arp + pad + kick + hat + snare) * 0.7
+        soft_clip(bass + sub + arp + lead + echo + pad + kick + hat + snare + glitch) * 0.72
     }
 }
 
@@ -222,6 +274,14 @@ fn square(seconds: f32, frequency: f32, width: f32) -> f32 {
 
 fn saw(seconds: f32, frequency: f32, amount: f32) -> f32 {
     (((seconds * frequency).fract() * 2.0) - 1.0) * amount
+}
+
+fn sine(seconds: f32, frequency: f32, amount: f32) -> f32 {
+    (seconds * frequency * TAU).sin() * amount
+}
+
+fn pulse(seconds: f32, frequency: f32, width: f32, amount: f32) -> f32 {
+    square(seconds, frequency, width) * amount + saw(seconds, frequency * 0.997, amount * 0.35)
 }
 
 fn gate(phase: f32, width: f32) -> f32 {

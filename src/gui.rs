@@ -186,6 +186,7 @@ impl eframe::App for EutherGui {
         egui::Frame::default()
             .fill(Color32::from_rgb(12, 13, 18))
             .show(ui, |ui| {
+                self.cyber_background(ui);
                 ui.vertical(|ui| {
                     ui.add_space(14.0);
                     self.header(ui);
@@ -212,6 +213,85 @@ impl eframe::App for EutherGui {
 }
 
 impl EutherGui {
+    fn cyber_background(&self, ui: &mut egui::Ui) {
+        let rect = ui.max_rect();
+        if !rect.is_finite() {
+            return;
+        }
+        let painter = ui.painter();
+        let phase = self.wave_phase;
+
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(6, 8, 12));
+
+        let horizon = rect.top() + rect.height() * 0.64;
+        let grid_color = Color32::from_rgba_premultiplied(35, 210, 185, 38);
+        let magenta = Color32::from_rgba_premultiplied(210, 48, 180, 45);
+        let amber = Color32::from_rgba_premultiplied(245, 177, 66, 32);
+
+        for i in 0..18 {
+            let t = i as f32 / 17.0;
+            let x = egui::lerp(rect.left()..=rect.right(), t);
+            painter.line_segment(
+                [pos2(rect.center().x, horizon), pos2(x, rect.bottom())],
+                Stroke::new(1.0, grid_color),
+            );
+        }
+
+        for i in 0..14 {
+            let t = i as f32 / 13.0;
+            let y = horizon + (rect.bottom() - horizon) * t.powf(1.65);
+            painter.line_segment(
+                [pos2(rect.left(), y), pos2(rect.right(), y)],
+                Stroke::new(1.0, grid_color),
+            );
+        }
+
+        for i in 0..28 {
+            let width = 28.0 + ((i * 37) % 90) as f32;
+            let height = 34.0 + ((i * 53) % 170) as f32;
+            let x = rect.left() + i as f32 * (rect.width() + 80.0) / 28.0 - 40.0;
+            let y = horizon - height;
+            let building = egui::Rect::from_min_size(pos2(x, y), vec2(width, height));
+            painter.rect_filled(
+                building,
+                0.0,
+                Color32::from_rgba_premultiplied(10, 16, 22, 205),
+            );
+
+            if i % 3 == 0 {
+                painter.line_segment(
+                    [building.left_top(), building.right_top()],
+                    Stroke::new(1.5, magenta),
+                );
+            }
+            for window in 0..4 {
+                if (i + window) % 2 == 0 {
+                    let wx = building.left() + 7.0 + window as f32 * 13.0;
+                    let wy = building.top() + 14.0 + ((i * window + 5) % 7) as f32 * 16.0;
+                    if wx < building.right() - 4.0 && wy < building.bottom() - 8.0 {
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(pos2(wx, wy), vec2(4.0, 10.0)),
+                            0.0,
+                            if window % 2 == 0 { amber } else { grid_color },
+                        );
+                    }
+                }
+            }
+        }
+
+        let scan_alpha = (22.0 + phase.sin().abs() * 18.0) as u8;
+        for i in 0..36 {
+            let y = rect.top() + i as f32 * rect.height() / 36.0;
+            painter.line_segment(
+                [pos2(rect.left(), y), pos2(rect.right(), y)],
+                Stroke::new(
+                    1.0,
+                    Color32::from_rgba_premultiplied(255, 255, 255, scan_alpha / 5),
+                ),
+            );
+        }
+    }
+
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -254,7 +334,7 @@ impl EutherGui {
 
     fn device_panel(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style())
-            .fill(Color32::from_rgb(24, 28, 30))
+            .fill(Color32::from_rgba_premultiplied(24, 28, 30, 226))
             .stroke(Stroke::new(1.0, Color32::from_rgb(59, 68, 70)))
             .inner_margin(16.0)
             .show(ui, |ui| {
@@ -380,7 +460,7 @@ impl EutherGui {
 
     fn flash_panel(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style())
-            .fill(Color32::from_rgb(22, 24, 27))
+            .fill(Color32::from_rgba_premultiplied(22, 24, 27, 226))
             .stroke(Stroke::new(1.0, Color32::from_rgb(59, 62, 68)))
             .inner_margin(18.0)
             .show(ui, |ui| {

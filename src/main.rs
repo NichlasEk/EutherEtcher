@@ -27,6 +27,7 @@ use crate::{
 
 #[derive(Debug, Parser)]
 #[command(name = "eutheretcher")]
+#[command(version)]
 #[command(about = "Safely write .iso and .img files to USB/SD block devices")]
 struct Cli {
     #[command(subcommand)]

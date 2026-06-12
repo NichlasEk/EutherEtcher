@@ -8,7 +8,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use eframe::egui::{
@@ -29,6 +29,8 @@ use crate::{
     safety::run_safety_checks,
     verify, writer,
 };
+
+const DEVICE_AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 enum FlashEvent {
     Status(String),
@@ -83,6 +85,8 @@ pub struct EutherGui {
     music: Option<AudioEngine>,
     music_error: Option<String>,
     show_preflight: bool,
+    last_device_refresh: Instant,
+    device_signature: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -140,6 +144,8 @@ impl Default for EutherGui {
             music: None,
             music_error: None,
             show_preflight: false,
+            last_device_refresh: Instant::now() - DEVICE_AUTO_REFRESH_INTERVAL,
+            device_signature: Vec::new(),
         };
         app.refresh_devices();
         if app.music_enabled {
@@ -223,6 +229,7 @@ impl eframe::App for EutherGui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_flash_events();
         self.poll_checksum_events();
+        self.auto_refresh_devices();
         if let Some(music) = &mut self.music {
             music.tick();
         }
@@ -778,15 +785,63 @@ impl EutherGui {
     }
 
     fn refresh_devices(&mut self) {
+        self.refresh_devices_inner(true);
+    }
+
+    fn auto_refresh_devices(&mut self) {
+        if self.running || self.checksum_running {
+            return;
+        }
+        if self.last_device_refresh.elapsed() < DEVICE_AUTO_REFRESH_INTERVAL {
+            return;
+        }
+        self.refresh_devices_inner(false);
+    }
+
+    fn refresh_devices_inner(&mut self, manual: bool) {
+        self.last_device_refresh = Instant::now();
         match list_devices() {
             Ok(devices) => {
+                let signature = devices_signature(&devices);
+                if !manual && signature == self.device_signature {
+                    return;
+                }
+
+                let previous_count = self.device_signature.len();
+                let current_count = signature.len();
                 self.devices = devices;
-                self.status = "Device list refreshed".to_string();
+                self.device_signature = signature;
+
+                if let Some(path) = self.selected_device.clone() {
+                    if find_device(&self.devices, &path).is_none() {
+                        self.selected_device = None;
+                        self.selected_device_identity = None;
+                        self.status = format!("Selected device disappeared: {path}");
+                    } else if manual {
+                        self.status = "Device list refreshed".to_string();
+                    } else if current_count > previous_count {
+                        self.status = "Device attached".to_string();
+                    } else if current_count < previous_count {
+                        self.status = "Device removed".to_string();
+                    } else {
+                        self.status = "Device list updated".to_string();
+                    }
+                } else if manual {
+                    self.status = "Device list refreshed".to_string();
+                } else if current_count > previous_count {
+                    self.status = "Device attached".to_string();
+                } else if current_count < previous_count {
+                    self.status = "Device removed".to_string();
+                } else {
+                    self.status = "Device list updated".to_string();
+                }
                 self.last_error = None;
             }
             Err(err) => {
-                self.last_error = Some(err.to_string());
-                self.status = "Could not refresh devices".to_string();
+                if manual {
+                    self.last_error = Some(err.to_string());
+                    self.status = "Could not refresh devices".to_string();
+                }
             }
         }
     }
@@ -1452,7 +1507,12 @@ impl EutherGui {
                     self.progress = if result.is_ok() { 1.0 } else { self.progress };
                     match result {
                         Ok(()) => {
-                            self.status = "Flash complete".to_string();
+                            if self.phase_name == "Verifying" {
+                                self.phase_done_bytes = self.phase_total_bytes;
+                                self.status = "Verified".to_string();
+                            } else {
+                                self.status = "Flash complete".to_string();
+                            }
                             self.last_error = None;
                         }
                         Err(err) => {
@@ -1550,6 +1610,28 @@ fn format_bytes(bytes: u64) -> String {
         } else {
             format!("{bytes} B")
         }
+    }
+}
+
+fn devices_signature(devices: &[BlockDevice]) -> Vec<String> {
+    let mut signature = Vec::new();
+    collect_device_signature(devices, &mut signature);
+    signature.sort();
+    signature
+}
+
+fn collect_device_signature(devices: &[BlockDevice], signature: &mut Vec<String>) {
+    for device in devices {
+        signature.push(format!(
+            "{}|{}|{}|{}|{}|{}",
+            device.path,
+            device.kind,
+            device.size_bytes.unwrap_or_default(),
+            device.transport.as_deref().unwrap_or("-"),
+            device.model.as_deref().unwrap_or("-"),
+            format_mountpoints(&device.mountpoints)
+        ));
+        collect_device_signature(&device.children, signature);
     }
 }
 

@@ -2,7 +2,7 @@
 name = "eutheretcher"
 version = "0.1.0"
 edition = "2021"
-description = "Linux-first CLI image writer for USB and SD devices"
+description = "Linux-first image writer for USB and SD devices"
 license = "MIT"
 
 [dependencies]

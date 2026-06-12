@@ -67,13 +67,7 @@ where
 }
 
 pub fn checksum_sidecar_status(path: &Path, actual_sha256: &str) -> Result<ChecksumStatus> {
-    let sidecar = PathBuf::from(format!("{}.sha256", path.display()));
-    if !sidecar.exists() {
-        return Ok(ChecksumStatus::Missing);
-    }
-
-    let data = fs::read_to_string(sidecar)?;
-    let Some(expected) = parse_sha256_sidecar(&data) else {
+    let Some(expected) = read_sha256_sidecar(path)? else {
         return Ok(ChecksumStatus::Missing);
     };
 
@@ -82,6 +76,16 @@ pub fn checksum_sidecar_status(path: &Path, actual_sha256: &str) -> Result<Check
     } else {
         Ok(ChecksumStatus::Mismatch { expected })
     }
+}
+
+pub fn read_sha256_sidecar(path: &Path) -> Result<Option<String>> {
+    let sidecar = PathBuf::from(format!("{}.sha256", path.display()));
+    if !sidecar.exists() {
+        return Ok(None);
+    }
+
+    let data = fs::read_to_string(sidecar)?;
+    Ok(parse_sha256_sidecar(&data))
 }
 
 fn parse_sha256_sidecar(data: &str) -> Option<String> {

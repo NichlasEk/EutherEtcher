@@ -20,7 +20,10 @@ use crate::{
     config::default_chunk_size_mib,
     device::{find_device, flatten_visible_devices, list_devices, BlockDevice},
     error::Result,
-    image::{checksum_sidecar_status, inspect_image, sha256_file_with_progress, ChecksumStatus},
+    image::{
+        checksum_sidecar_status, inspect_image, read_sha256_sidecar, sha256_file_with_progress,
+        ChecksumStatus,
+    },
     music::AudioEngine,
     safety::run_safety_checks,
     verify, writer,
@@ -40,7 +43,7 @@ enum ChecksumEvent {
     },
     Finished {
         path: String,
-        result: std::result::Result<(String, ChecksumStatus), String>,
+        result: std::result::Result<(Option<String>, ChecksumStatus), String>,
     },
 }
 
@@ -52,6 +55,7 @@ pub struct EutherGui {
     confirm_path: String,
     chunk_size_mib: u64,
     verify_after_write: bool,
+    verify_source_checksum: bool,
     force: bool,
     status: String,
     last_error: Option<String>,
@@ -90,6 +94,7 @@ impl Default for EutherGui {
             confirm_path: String::new(),
             chunk_size_mib: default_chunk_size_mib(),
             verify_after_write: true,
+            verify_source_checksum: false,
             force: false,
             status: "Ready".to_string(),
             last_error: None,
@@ -406,6 +411,12 @@ impl EutherGui {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.verify_after_write, "Verify after write");
+                    if ui
+                        .checkbox(&mut self.verify_source_checksum, "Check SHA256 sidecar")
+                        .changed()
+                    {
+                        self.reset_checksum_state();
+                    }
                     ui.checkbox(&mut self.force, "Force");
                     ui.add(
                         egui::DragValue::new(&mut self.chunk_size_mib)
@@ -618,14 +629,7 @@ impl EutherGui {
             .pick_file()
         {
             self.image_path = path.display().to_string();
-            self.image_sha256 = None;
-            self.image_sha256_path = None;
-            self.checksum_status = None;
-            self.checksum_receiver = None;
-            self.checksum_running = false;
-            self.checksum_done_bytes = 0;
-            self.checksum_total_bytes = 0;
-            self.checksum_started_at = None;
+            self.reset_checksum_state();
             self.last_error = None;
             self.status = "Image selected".to_string();
         }
@@ -643,14 +647,7 @@ impl EutherGui {
                 .map(str::to_ascii_lowercase);
             if matches!(extension.as_deref(), Some("iso" | "img")) {
                 self.image_path = path.display().to_string();
-                self.image_sha256 = None;
-                self.image_sha256_path = None;
-                self.checksum_status = None;
-                self.checksum_receiver = None;
-                self.checksum_running = false;
-                self.checksum_done_bytes = 0;
-                self.checksum_total_bytes = 0;
-                self.checksum_started_at = None;
+                self.reset_checksum_state();
                 self.last_error = None;
                 self.status = "Image dropped".to_string();
                 break;
@@ -699,6 +696,17 @@ impl EutherGui {
         find_device(&self.devices, path)
             .cloned()
             .ok_or_else(|| format!("Device no longer present: {path}"))
+    }
+
+    fn reset_checksum_state(&mut self) {
+        self.image_sha256 = None;
+        self.image_sha256_path = None;
+        self.checksum_status = None;
+        self.checksum_receiver = None;
+        self.checksum_running = false;
+        self.checksum_done_bytes = 0;
+        self.checksum_total_bytes = 0;
+        self.checksum_started_at = None;
     }
 
     fn verify_selected_device_identity(
@@ -763,9 +771,50 @@ impl EutherGui {
 
     fn start_checksum_if_needed(&mut self, total_bytes: u64) {
         let path = self.image_path.trim().to_string();
+        if !self.verify_source_checksum {
+            self.image_sha256 = None;
+            self.image_sha256_path = Some(path);
+            self.checksum_status = Some(ChecksumStatus::Missing);
+            self.checksum_receiver = None;
+            self.checksum_running = false;
+            self.checksum_done_bytes = 0;
+            self.checksum_total_bytes = 0;
+            self.checksum_started_at = None;
+            self.progress = 0.0;
+            self.status = "SHA256 sidecar check skipped".to_string();
+            return;
+        }
+
         if self.image_sha256_path.as_deref() == Some(path.as_str()) && self.image_sha256.is_some() {
             self.status = "Review pre-flight confirmation".to_string();
             return;
+        }
+
+        match read_sha256_sidecar(PathBuf::from(&path).as_path()) {
+            Ok(None) => {
+                self.image_sha256 = None;
+                self.image_sha256_path = Some(path);
+                self.checksum_status = Some(ChecksumStatus::Missing);
+                self.checksum_receiver = None;
+                self.checksum_running = false;
+                self.checksum_done_bytes = 0;
+                self.checksum_total_bytes = 0;
+                self.checksum_started_at = None;
+                self.progress = 0.0;
+                self.status = "No SHA256 sidecar found; pre-flight checksum skipped".to_string();
+                return;
+            }
+            Ok(Some(_expected)) => {}
+            Err(err) => {
+                self.image_sha256 = None;
+                self.image_sha256_path = None;
+                self.checksum_status = None;
+                self.checksum_receiver = None;
+                self.checksum_running = false;
+                self.status = "Pre-flight failed".to_string();
+                self.last_error = Some(err.to_string());
+                return;
+            }
         }
 
         self.image_sha256 = None;
@@ -791,7 +840,7 @@ impl EutherGui {
             .map_err(|err| err.to_string())
             .and_then(|hash| {
                 checksum_sidecar_status(PathBuf::from(&path).as_path(), &hash)
-                    .map(|status| (hash, status))
+                    .map(|status| (Some(hash), status))
                     .map_err(|err| err.to_string())
             });
             let _ = sender.send(ChecksumEvent::Finished { path, result });
@@ -878,10 +927,9 @@ impl EutherGui {
 
         if self.checksum_running
             || self.image_sha256_path.as_deref() != Some(self.image_path.trim())
-            || self.image_sha256.is_none()
         {
             self.show_preflight = true;
-            self.last_error = Some("SHA256 pre-flight is still running".to_string());
+            self.last_error = Some("Pre-flight is still running".to_string());
             return;
         }
 
@@ -1051,7 +1099,7 @@ impl EutherGui {
             .as_ref()
             .is_some_and(|device| self.confirm_path.trim() == device.path);
         let checksum_ready = self.image_sha256_path.as_deref() == Some(self.image_path.trim())
-            && self.image_sha256.is_some()
+            && self.checksum_status.is_some()
             && !self.checksum_running;
         let checksum_ok = checksum_ready
             && !matches!(self.checksum_status, Some(ChecksumStatus::Mismatch { .. }));
@@ -1080,11 +1128,23 @@ impl EutherGui {
                         "SHA256",
                         if self.checksum_running {
                             "calculating..."
+                        } else if !self.verify_source_checksum {
+                            "skipped"
+                        } else if matches!(self.checksum_status, Some(ChecksumStatus::Missing)) {
+                            "not provided"
                         } else {
                             self.image_sha256.as_deref().unwrap_or("not calculated")
                         },
                     );
                     checksum_row(ui, self.checksum_status.as_ref());
+                    if !self.verify_source_checksum {
+                        ui.label(
+                            RichText::new(
+                                "Source checksum is opt-in. Write verification can still run after flashing.",
+                            )
+                            .color(Color32::from_rgb(148, 156, 154)),
+                        );
+                    }
                     if self.checksum_running {
                         ui.add(
                             egui::ProgressBar::new(if self.checksum_total_bytes == 0 {
@@ -1264,7 +1324,7 @@ impl EutherGui {
                     self.progress = 1.0;
                     match result {
                         Ok((hash, status)) => {
-                            self.image_sha256 = Some(hash);
+                            self.image_sha256 = hash;
                             self.image_sha256_path = Some(path);
                             self.checksum_status = Some(status);
                             self.status = "Review pre-flight confirmation".to_string();

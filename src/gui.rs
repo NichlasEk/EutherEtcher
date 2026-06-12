@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -14,6 +14,7 @@ use std::{
 use eframe::egui::{
     self, pos2, vec2, Align, Color32, FontId, Layout, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     cancel::CancelFlag,
@@ -24,7 +25,7 @@ use crate::{
         checksum_sidecar_status, inspect_image, read_sha256_sidecar, sha256_file_with_progress,
         ChecksumStatus,
     },
-    music::AudioEngine,
+    music::{default_music_volume, AudioEngine},
     safety::run_safety_checks,
     verify, writer,
 };
@@ -78,13 +79,32 @@ pub struct EutherGui {
     checksum_started_at: Option<Instant>,
     show_internal_drives: bool,
     music_enabled: bool,
+    music_volume: f32,
     music: Option<AudioEngine>,
     music_error: Option<String>,
     show_preflight: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct GuiSettings {
+    #[serde(default = "default_true")]
+    music_enabled: bool,
+    #[serde(default = "default_music_volume")]
+    music_volume: f32,
+}
+
+impl Default for GuiSettings {
+    fn default() -> Self {
+        Self {
+            music_enabled: true,
+            music_volume: default_music_volume(),
+        }
+    }
+}
+
 impl Default for EutherGui {
     fn default() -> Self {
+        let settings = load_gui_settings();
         let mut app = Self {
             devices: Vec::new(),
             selected_device: None,
@@ -115,13 +135,16 @@ impl Default for EutherGui {
             checksum_total_bytes: 0,
             checksum_started_at: None,
             show_internal_drives: false,
-            music_enabled: true,
+            music_enabled: settings.music_enabled,
+            music_volume: settings.music_volume.clamp(0.0, 1.0),
             music: None,
             music_error: None,
             show_preflight: false,
         };
         app.refresh_devices();
-        app.start_music();
+        if app.music_enabled {
+            app.start_music();
+        }
         app
     }
 }
@@ -173,6 +196,29 @@ fn log_gui_event(message: impl AsRef<str>) {
     }
 }
 
+fn load_gui_settings() -> GuiSettings {
+    let Some(path) = gui_settings_path() else {
+        return GuiSettings::default();
+    };
+    let Ok(data) = fs::read_to_string(path) else {
+        return GuiSettings::default();
+    };
+    toml::from_str::<GuiSettings>(&data).unwrap_or_default()
+}
+
+fn gui_settings_path() -> Option<PathBuf> {
+    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(config_home).join("eutheretcher/gui.toml"));
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config/eutheretcher/gui.toml"))
+}
+
+fn default_true() -> bool {
+    true
+}
+
 impl eframe::App for EutherGui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_flash_events();
@@ -209,6 +255,16 @@ impl eframe::App for EutherGui {
                     }
                 });
             });
+    }
+
+    fn on_exit(&mut self) {
+        self.shutdown_audio();
+    }
+}
+
+impl Drop for EutherGui {
+    fn drop(&mut self) {
+        self.shutdown_audio();
     }
 }
 
@@ -558,6 +614,24 @@ impl EutherGui {
                     );
                 }
 
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Music volume").color(Color32::from_rgb(148, 156, 154)));
+                    let changed = ui
+                        .add_sized(
+                            [150.0, 18.0],
+                            egui::Slider::new(&mut self.music_volume, 0.0..=0.35).show_value(false),
+                        )
+                        .changed();
+                    ui.label(
+                        RichText::new(format!("{:.0}%", self.music_volume * 100.0))
+                            .font(FontId::monospace(12.0))
+                            .color(Color32::from_rgb(148, 156, 154)),
+                    );
+                    if changed {
+                        self.apply_music_volume();
+                    }
+                });
+
                 if let Some(error) = &self.last_error {
                     ui.add_space(8.0);
                     ui.label(RichText::new(error).color(Color32::from_rgb(245, 119, 98)));
@@ -717,7 +791,7 @@ impl EutherGui {
     }
 
     fn start_music(&mut self) {
-        match AudioEngine::start_random() {
+        match AudioEngine::start_random(self.music_volume) {
             Ok(engine) => {
                 self.music = Some(engine);
                 self.music_enabled = true;
@@ -739,6 +813,7 @@ impl EutherGui {
             self.music_enabled = true;
             self.start_music();
         }
+        self.save_gui_settings();
     }
 
     fn next_music_track(&mut self) {
@@ -747,6 +822,37 @@ impl EutherGui {
         } else if self.music_enabled {
             self.start_music();
         }
+    }
+
+    fn apply_music_volume(&mut self) {
+        self.music_volume = self.music_volume.clamp(0.0, 1.0);
+        if let Some(music) = &mut self.music {
+            music.set_volume(self.music_volume);
+        }
+        self.save_gui_settings();
+    }
+
+    fn save_gui_settings(&self) {
+        let Some(path) = gui_settings_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        let settings = GuiSettings {
+            music_enabled: self.music_enabled,
+            music_volume: self.music_volume.clamp(0.0, 1.0),
+        };
+        if let Ok(data) = toml::to_string_pretty(&settings) {
+            let _ = fs::write(path, data);
+        }
+    }
+
+    fn shutdown_audio(&mut self) {
+        self.save_gui_settings();
+        self.music = None;
     }
 
     fn selected_block_device(&self) -> std::result::Result<BlockDevice, String> {
@@ -1746,4 +1852,23 @@ fn command_exists(command: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_gui_settings_toml() {
+        let settings: GuiSettings = toml::from_str(
+            r#"
+            music_enabled = true
+            music_volume = 0.08
+            "#,
+        )
+        .expect("settings should parse");
+
+        assert!(settings.music_enabled);
+        assert_eq!(settings.music_volume, 0.08);
+    }
 }

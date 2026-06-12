@@ -33,6 +33,7 @@ pub struct AudioEngine {
     track_index: usize,
     file_tracks: Vec<MusicTrack>,
     current_name: String,
+    volume: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,10 +66,12 @@ struct MusicTrack {
     file: PathBuf,
     license: String,
     source: String,
+    #[serde(default)]
+    start_offset_seconds: f32,
 }
 
 impl AudioEngine {
-    pub fn start_random() -> Result<Self> {
+    pub fn start_random(volume: f32) -> Result<Self> {
         let mut device_sink = DeviceSinkBuilder::open_default_sink()
             .map_err(|err| EutherError::Audio(err.to_string()))?;
         device_sink.log_on_drop(false);
@@ -81,6 +84,7 @@ impl AudioEngine {
             track_index: random_index(track_count),
             file_tracks,
             current_name: String::new(),
+            volume: volume.clamp(0.0, 1.0),
         };
         engine.restart_current_track();
         Ok(engine)
@@ -94,6 +98,11 @@ impl AudioEngine {
 
     pub fn track_name(&self) -> &str {
         &self.current_name
+    }
+
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        self.player.set_volume(self.volume);
     }
 
     fn restart_current_track(&mut self) {
@@ -115,7 +124,9 @@ impl AudioEngine {
                         track.license,
                         source_label(&track.source)
                     );
-                    self.player.append(source.repeat_infinite());
+                    let offset = Duration::from_secs_f32(track.start_offset_seconds.max(0.0));
+                    self.player
+                        .append(source.skip_duration(offset).repeat_infinite());
                 }
                 Err(_) => {
                     self.restart_procedural();
@@ -126,7 +137,7 @@ impl AudioEngine {
         }
 
         self.player.play();
-        self.player.set_volume(0.24);
+        self.player.set_volume(self.volume);
     }
 
     fn restart_procedural(&mut self) {
@@ -134,6 +145,16 @@ impl AudioEngine {
         self.current_name = format!("{} (generated)", track.name);
         self.player.append(CyberSource::new(track));
     }
+}
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        self.player.stop();
+    }
+}
+
+pub fn default_music_volume() -> f32 {
+    0.12
 }
 
 impl CyberTrack {
@@ -427,4 +448,28 @@ fn random_index(max: usize) -> usize {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as usize % max)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_track_start_offset() {
+        let manifest: MusicManifest = toml::from_str(
+            r#"
+            [[track]]
+            title = "Intro Trim"
+            author = "Tester"
+            file = "intro.ogg"
+            license = "CC0"
+            source = "https://example.invalid"
+            start_offset_seconds = 1.25
+            "#,
+        )
+        .expect("manifest should parse");
+
+        assert_eq!(manifest.track.len(), 1);
+        assert_eq!(manifest.track[0].start_offset_seconds, 1.25);
+    }
 }

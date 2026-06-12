@@ -9,6 +9,7 @@ author = "brandon75689"
 file = "tragic-ambient-main-menu.ogg"
 license = "CC0 / OGA-BY 3.0"
 source = "https://opengameart.org/content/tragic-ambient-main-menu"
+start_offset_seconds = 0.7
 
 [[track]]
 title = "Crystal Cave + Mysterious Ambience"
@@ -16,6 +17,7 @@ author = "cynicmusic"
 file = "crystal-cave-mysterious-ambience.ogg"
 license = "CC-BY 3.0"
 source = "https://opengameart.org/content/crystal-cave-mysterious-ambience-seamless-loop"
+start_offset_seconds = 1.0
 
 [[track]]
 title = "Factory ambiance"
@@ -23,6 +25,7 @@ author = "yd"
 file = "factory-ambiance.ogg"
 license = "CC0"
 source = "https://opengameart.org/content/factory-ambiance"
+start_offset_seconds = 0.5
 
 [[track]]
 title = "Through Space"
@@ -30,3 +33,4 @@ author = "maxstack"
 file = "through-space.ogg"
 license = "CC-BY-SA 3.0"
 source = "https://opengameart.org/content/through-space"
+start_offset_seconds = 1.5

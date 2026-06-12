@@ -140,6 +140,7 @@ author = "Example Artist"
 file = "night-bus-terminal.ogg"
 license = "CC0"
 source = "https://example.invalid/source"
+start_offset_seconds = 0.8
 ```
 
 Paths are relative to the manifest file unless absolute. EutherEtcher searches:
@@ -153,6 +154,14 @@ Paths are relative to the manifest file unless absolute. EutherEtcher searches:
 
 Only add music you are allowed to redistribute. Keep artist, license, and source
 metadata in the manifest so release packages preserve attribution.
+
+The GUI saves personal audio settings as TOML in
+`$XDG_CONFIG_HOME/eutheretcher/gui.toml` or `~/.config/eutheretcher/gui.toml`:
+
+```toml
+music_enabled = true
+music_volume = 0.12
+```
 
 ## Notes
 

@@ -806,7 +806,7 @@ impl EutherGui {
 
     fn toggle_music(&mut self) {
         if self.music_enabled {
-            self.music = None;
+            self.shutdown_audio();
             self.music_enabled = false;
         } else {
             self.music_enabled = true;
@@ -851,6 +851,9 @@ impl EutherGui {
 
     fn shutdown_audio(&mut self) {
         self.save_gui_settings();
+        if let Some(music) = &mut self.music {
+            music.shutdown();
+        }
         self.music = None;
     }
 

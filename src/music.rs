@@ -8,7 +8,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use rodio::{
+    cpal::{BufferSize, StreamError},
+    Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source,
+};
 use serde::Deserialize;
 
 use crate::error::{EutherError, Result};
@@ -73,9 +76,13 @@ struct MusicTrack {
 
 impl AudioEngine {
     pub fn start_random(volume: f32) -> Result<Self> {
-        let mut device_sink = DeviceSinkBuilder::open_default_sink()
+        let mut device_sink = DeviceSinkBuilder::from_default_device()
+            .map(|builder| builder.with_error_callback(audio_stream_error))
+            .map(|builder| builder.with_buffer_size(BufferSize::Fixed(2048)))
+            .and_then(|builder| builder.open_sink_or_fallback())
             .map_err(|err| EutherError::Audio(err.to_string()))?;
         device_sink.log_on_drop(false);
+        log_music_event(format!("sink_opened: config={:?}", device_sink.config()));
         let player = Player::connect_new(device_sink.mixer());
         let file_tracks = load_music_tracks();
         let track_count = file_tracks.len().max(TRACKS.len());
@@ -105,6 +112,12 @@ impl AudioEngine {
         self.volume = volume.clamp(0.0, 1.0);
         self.player.set_volume(self.volume);
         log_music_event(format!("set_volume: {:.2}", self.volume));
+    }
+
+    pub fn shutdown(&mut self) {
+        log_music_event("shutdown");
+        self.player.set_volume(0.0);
+        self.player.stop();
     }
 
     fn restart_current_track(&mut self) {
@@ -166,7 +179,7 @@ impl AudioEngine {
 
 impl Drop for AudioEngine {
     fn drop(&mut self) {
-        self.player.stop();
+        self.shutdown();
     }
 }
 
@@ -182,6 +195,10 @@ fn log_music_event(message: impl AsRef<str>) {
     {
         let _ = writeln!(file, "{}", message.as_ref());
     }
+}
+
+fn audio_stream_error(err: StreamError) {
+    log_music_event(format!("stream_error: {err}"));
 }
 
 impl CyberTrack {

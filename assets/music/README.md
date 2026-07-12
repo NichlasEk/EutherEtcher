@@ -42,6 +42,9 @@ third-party reference audio. Prompts, model identifiers, job IDs, mastering
 notes, and the CC0 dedication are recorded in
 [`ACE_STEP_PROVENANCE.md`](ACE_STEP_PROVENANCE.md).
 
+Only the five tracks referenced by the bundled `music.toml` are shipped in the
+release package. Earlier OpenGameArt test tracks are intentionally not bundled.
+
 Search order:
 
 - `assets/music/music.toml` in a development checkout

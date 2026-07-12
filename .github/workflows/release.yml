@@ -35,6 +35,7 @@ jobs:
           mkdir -p "dist/${package}"
           cp target/release/eutheretcher "dist/${package}/"
           cp README.md "dist/${package}/"
+          cp LICENSE "dist/${package}/"
           mkdir -p "dist/${package}/assets"
           cp assets/eutheretcher.svg "dist/${package}/assets/"
           cp -R assets/music "dist/${package}/assets/"

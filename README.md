@@ -318,9 +318,9 @@ Use this before tagging an alpha release:
 
 ## Release
 
-Pushing a tag like `v0.1.0-alpha` runs the release workflow and publishes a
-`.tar.gz` containing the binary, icon, desktop file, polkit policy, README, and
-install script.
+Pushing a tag like `v0.1.0-alpha.3` runs the release workflow and publishes a
+`.tar.gz` containing the binary, icon, desktop file, polkit policy, README,
+license, music pack, and install script.
 
 Suggested alpha release flow:
 
@@ -330,9 +330,20 @@ cargo check
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
-git tag v0.1.0-alpha
-git push origin v0.1.0-alpha
+git tag v0.1.0-alpha.3
+git push origin v0.1.0-alpha.3
 ```
+
+## License
+
+EutherEtcher source code is available under the [MIT License](LICENSE).
+
+The bundled ApothicTECH ACE-Step music pack is dedicated under CC0-1.0 for any
+copyright and related rights ApothicTECH may hold. Its generation and mastering
+provenance is documented in
+[`assets/music/ACE_STEP_PROVENANCE.md`](assets/music/ACE_STEP_PROVENANCE.md).
+
+Third-party Rust dependencies remain under their respective licenses.
 
 ## Notes
 

@@ -1,36 +1,49 @@
-# Bundled EutherEtcher music pack.
+# Bundled ApothicTECH cyberpunk music pack for EutherEtcher.
 #
-# These are real redistributed OGG files. Keep each source URL and license with
-# the track so package builds preserve attribution.
+# These original instrumental cues were generated locally with ACE-Step 1.5,
+# reviewed, and encoded from 48 kHz WAV masters. See ACE_STEP_PROVENANCE.md.
 
 [[track]]
-title = "Tragic ambient main menu"
-author = "brandon75689"
-file = "tragic-ambient-main-menu.ogg"
-license = "CC0 / OGA-BY 3.0"
-source = "https://opengameart.org/content/tragic-ambient-main-menu"
-start_offset_seconds = 0.7
+title = "Apothic Neutral Ambient"
+cue = "neutral"
+author = "ApothicTECH + ACE-Step 1.5"
+file = "apothic-neutral-ambient.ogg"
+license = "CC0-1.0 dedication by ApothicTECH"
+source = "https://github.com/NichlasEk/EutherEtcher"
+start_offset_seconds = 0.0
 
 [[track]]
-title = "Crystal Cave + Mysterious Ambience"
-author = "cynicmusic"
-file = "crystal-cave-mysterious-ambience.ogg"
-license = "CC-BY 3.0"
-source = "https://opengameart.org/content/crystal-cave-mysterious-ambience-seamless-loop"
-start_offset_seconds = 1.0
+title = "Apothic Crystal Armed"
+cue = "image_armed"
+author = "ApothicTECH + ACE-Step 1.5"
+file = "apothic-crystal-armed.ogg"
+license = "CC0-1.0 dedication by ApothicTECH"
+source = "https://github.com/NichlasEk/EutherEtcher"
+start_offset_seconds = 0.0
 
 [[track]]
-title = "Factory ambiance"
-author = "yd"
-file = "factory-ambiance.ogg"
-license = "CC0"
-source = "https://opengameart.org/content/factory-ambiance"
-start_offset_seconds = 0.5
+title = "Apothic Factory Ready"
+cue = "ready"
+author = "ApothicTECH + ACE-Step 1.5"
+file = "apothic-factory-ready.ogg"
+license = "CC0-1.0 dedication by ApothicTECH"
+source = "https://github.com/NichlasEk/EutherEtcher"
+start_offset_seconds = 0.0
 
 [[track]]
-title = "Through Space"
-author = "maxstack"
-file = "through-space.ogg"
-license = "CC-BY-SA 3.0"
-source = "https://opengameart.org/content/through-space"
-start_offset_seconds = 1.5
+title = "Apothic Space Flashing"
+cue = "flashing"
+author = "ApothicTECH + ACE-Step 1.5"
+file = "apothic-space-flashing.ogg"
+license = "CC0-1.0 dedication by ApothicTECH"
+source = "https://github.com/NichlasEk/EutherEtcher"
+start_offset_seconds = 0.0
+
+[[track]]
+title = "Apothic Crystal Success"
+cue = "success"
+author = "ApothicTECH + ACE-Step 1.5"
+file = "apothic-crystal-success.ogg"
+license = "CC0-1.0 dedication by ApothicTECH"
+source = "https://github.com/NichlasEk/EutherEtcher"
+start_offset_seconds = 0.0

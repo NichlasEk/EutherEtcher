@@ -17,7 +17,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libasound2-dev
+          sudo apt-get install --yes dpkg-dev libasound2-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -36,8 +36,29 @@ jobs:
       - name: Release build
         run: cargo build --release
 
+      - name: Build Debian package
+        run: |
+          chmod +x scripts/package-deb.sh
+          scripts/package-deb.sh 0.1.0-ci amd64
+
+      - name: Build AppImage
+        run: |
+          curl --fail --location --output linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage scripts/package-appimage.sh
+          LINUXDEPLOY="$PWD/linuxdeploy-x86_64.AppImage" \
+            scripts/package-appimage.sh 0.1.0-ci
+
+      - name: Smoke-test AppImage payload
+        run: |
+          dist/EutherEtcher-0.1.0-ci-x86_64.AppImage --appimage-extract >/dev/null
+          ./squashfs-root/AppRun --version
+
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
           name: eutheretcher-linux-x86_64
-          path: target/release/eutheretcher
+          path: |
+            target/release/eutheretcher
+            dist/*.deb
+            dist/*.AppImage

@@ -8,7 +8,7 @@ rather refuse to write than risk writing to the wrong disk.
 
 ## Status
 
-Recommended release label: `v0.1.0-alpha`.
+Recommended release: [`v0.1.0-alpha.3`](https://github.com/NichlasEk/EutherEtcher/releases/tag/v0.1.0-alpha.3).
 
 What works today:
 
@@ -145,6 +145,32 @@ cargo build --release
 ```
 
 ## Install Desktop App
+
+Download a release from GitHub. Three Linux formats are published:
+
+- `.deb` for Debian and Ubuntu; installs the app, desktop entry, music, and polkit policy.
+- `.AppImage` for a portable GUI; make it executable and run it without arguments.
+- `.tar.gz` for manual or advanced installation.
+
+Debian/Ubuntu:
+
+```bash
+sudo apt install ./eutheretcher_VERSION_amd64.deb
+```
+
+Portable AppImage:
+
+```bash
+chmod +x EutherEtcher-VERSION-x86_64.AppImage
+./EutherEtcher-VERSION-x86_64.AppImage
+```
+
+The `.deb` package is the recommended format for real flashing because it
+installs the matching polkit policy and privileged helper path. The AppImage is
+best for trying the interface; desktop authorization behavior can vary by
+distribution.
+
+Build and install from source:
 
 ```bash
 cargo build --release

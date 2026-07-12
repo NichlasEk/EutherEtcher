@@ -19,7 +19,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libasound2-dev
+          sudo apt-get install --yes dpkg-dev libasound2-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -44,7 +44,27 @@ jobs:
           cp scripts/install-desktop.sh "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
 
+      - name: Build Debian package
+        run: |
+          chmod +x scripts/package-deb.sh
+          scripts/package-deb.sh "${GITHUB_REF_NAME#v}" amd64
+
+      - name: Build AppImage
+        run: |
+          curl --fail --location --output linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage scripts/package-appimage.sh
+          LINUXDEPLOY="$PWD/linuxdeploy-x86_64.AppImage" \
+            scripts/package-appimage.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Create checksums
+        run: sha256sum dist/*.tar.gz dist/*.deb dist/*.AppImage > dist/SHA256SUMS
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.AppImage
+            dist/SHA256SUMS

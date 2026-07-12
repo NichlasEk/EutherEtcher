@@ -58,7 +58,9 @@ jobs:
             scripts/package-appimage.sh "${GITHUB_REF_NAME#v}"
 
       - name: Create checksums
-        run: sha256sum dist/*.tar.gz dist/*.deb dist/*.AppImage > dist/SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.deb *.AppImage > SHA256SUMS
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

@@ -90,6 +90,8 @@ struct MusicManifest {
 struct MusicTrack {
     title: String,
     #[serde(default)]
+    cue: Option<String>,
+    #[serde(default)]
     author: Option<String>,
     file: PathBuf,
     license: String,
@@ -349,6 +351,22 @@ impl AudioEngine {
                 MusicCue::Success => 5,
             };
             return Some(index % TRACKS.len());
+        }
+
+        let cue_name = match cue {
+            MusicCue::Neutral => "neutral",
+            MusicCue::ImageArmed => "image_armed",
+            MusicCue::Ready => "ready",
+            MusicCue::Flashing => "flashing",
+            MusicCue::Success => "success",
+        };
+        if let Some(index) = self.file_tracks.iter().position(|track| {
+            track
+                .cue
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(cue_name))
+        }) {
+            return Some(index);
         }
 
         let preferred = match cue {
@@ -1052,6 +1070,7 @@ mod tests {
             r#"
             [[track]]
             title = "Intro Trim"
+            cue = "ready"
             author = "Tester"
             file = "intro.ogg"
             license = "CC0"
@@ -1062,6 +1081,7 @@ mod tests {
         .expect("manifest should parse");
 
         assert_eq!(manifest.track.len(), 1);
+        assert_eq!(manifest.track[0].cue.as_deref(), Some("ready"));
         assert_eq!(manifest.track[0].start_offset_seconds, 1.25);
     }
 }

@@ -348,7 +348,7 @@ impl EutherGui {
             if i % 4 == 0 {
                 painter.line_segment(
                     [building.left_top(), building.right_top()],
-                    Stroke::new(1.4, magenta),
+                    Stroke::new(1.4_f32, magenta),
                 );
             }
 
@@ -384,7 +384,7 @@ impl EutherGui {
         painter.add(egui::Shape::convex_polygon(
             road_polygon,
             Color32::from_rgba_premultiplied(3, 6, 10, 190),
-            Stroke::new(1.0, Color32::from_rgba_premultiplied(35, 238, 211, 70)),
+            Stroke::new(1.0_f32, Color32::from_rgba_premultiplied(35, 238, 211, 70)),
         ));
 
         for lane in -6..=6 {
@@ -522,7 +522,7 @@ impl EutherGui {
     fn device_panel(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style())
             .fill(Color32::from_rgba_premultiplied(24, 28, 30, 226))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(59, 68, 70)))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(59, 68, 70)))
             .inner_margin(16.0)
             .show(ui, |ui| {
                 ui.heading("2. Target");
@@ -585,7 +585,7 @@ impl EutherGui {
                 Color32::from_rgb(29, 33, 35)
             })
             .stroke(Stroke::new(
-                1.0,
+                1.0_f32,
                 if selected {
                     if device.is_dangerous_internal() {
                         Color32::from_rgb(245, 83, 70)
@@ -649,7 +649,7 @@ impl EutherGui {
     fn flash_panel(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style())
             .fill(Color32::from_rgba_premultiplied(22, 24, 27, 226))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(59, 62, 68)))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(59, 62, 68)))
             .inner_margin(18.0)
             .show(ui, |ui| {
                 self.signal_canvas(ui);
@@ -766,7 +766,7 @@ impl EutherGui {
         painter.rect_stroke(
             rect,
             8.0,
-            Stroke::new(1.0, Color32::from_rgb(52, 62, 63)),
+            Stroke::new(1.0_f32, Color32::from_rgb(52, 62, 63)),
             StrokeKind::Outside,
         );
 
@@ -863,7 +863,7 @@ impl EutherGui {
 
         egui::Frame::default()
             .fill(fill)
-            .stroke(Stroke::new(1.0, stroke))
+            .stroke(Stroke::new(1.0_f32, stroke))
             .corner_radius(6.0)
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
